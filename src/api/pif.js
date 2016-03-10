@@ -47,3 +47,22 @@ connect.params = {
 connect.resolve = {
   PIF: ['id', 'PIF', 'administrate']
 }
+// ===================================================================
+// Reconfigure IP
+
+export async function reconfigureIp ({ PIF, mode, ip, netmask, gateway, dns }) {
+  await this.getXapi(PIF).call('PIF.reconfigure_ip', PIF._xapiRef, mode, ip, netmask, gateway, dns)
+}
+
+reconfigureIp.params = {
+  id: { type: 'string' },
+  mode: { type: 'string' },
+  ip: { type: 'string' },
+  netmask: { type: 'string' },
+  gateway: { type: 'string', optional: true },
+  dns: { type: 'string', optional: true }
+}
+
+reconfigureIp.resolve = {
+  PIF: ['id', 'PIF', 'administrate']
+}

@@ -370,6 +370,8 @@ const TRANSFORMS = {
 
       attached: Boolean(obj.currently_attached),
       device: obj.device,
+      DNS: obj.DNS,
+      gateway: obj.gateway,
       IP: obj.IP,
       MAC: obj.MAC,
       management: Boolean(obj.management), // TODO: find a better name.
