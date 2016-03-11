@@ -371,6 +371,7 @@ const TRANSFORMS = {
       attached: Boolean(obj.currently_attached),
       device: obj.device,
       DNS: obj.DNS,
+      disallowUnplug: obj.disallow_unplug,
       gateway: obj.gateway,
       IP: obj.IP,
       MAC: obj.MAC,

@@ -57,8 +57,8 @@ export async function reconfigureIp ({ PIF, mode, ip, netmask, gateway, dns }) {
 reconfigureIp.params = {
   id: { type: 'string' },
   mode: { type: 'string' },
-  ip: { type: 'string' },
-  netmask: { type: 'string' },
+  ip: { type: 'string', optional: true },
+  netmask: { type: 'string', optional: true },
   gateway: { type: 'string', optional: true },
   dns: { type: 'string', optional: true }
 }
