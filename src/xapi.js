@@ -1037,7 +1037,7 @@ export default class Xapi extends XapiBase {
       generation_id,
       ha_always_run: asBoolean(ha_always_run),
       ha_restart_priority,
-      hardware_platform_version,
+      hardware_platform_version: optional(hardware_platform_version, asInteger),
       // HVM_shadow_multiplier: asFloat(HVM_shadow_multiplier), // FIXME: does not work FIELD_TYPE_ERROR(hVM_shadow_multiplier)
       name_description,
       name_label,
