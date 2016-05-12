@@ -1,4 +1,4 @@
-import {JsonRpcError} from '../api-errors'
+import {GenericError} from '../api-errors'
 
 // ===================================================================
 
@@ -9,7 +9,7 @@ export async function set ({
   name_description: nameDescription,
   name_label: nameLabel
 }) {
-  await this.getXAPI(pool).setPoolProperties({
+  await this.getXapi(pool).setPoolProperties({
     nameDescription,
     nameLabel
   })
@@ -36,7 +36,7 @@ set.resolve = {
 // -------------------------------------------------------------------
 
 export async function setDefaultSr ({pool, sr}) {
-  await this.getXAPI(pool).setDefaultSr(sr._xapiId)
+  await this.getXapi(pool).setDefaultSr(sr._xapiId)
 }
 
 setDefaultSr.params = {
@@ -55,7 +55,7 @@ setDefaultSr.resolve = {
 // -------------------------------------------------------------------
 
 export async function installPatch ({pool, patch: patchUuid}) {
-  await this.getXAPI(pool).installPoolPatchOnAllHosts(patchUuid)
+  await this.getXapi(pool).installPoolPatchOnAllHosts(patchUuid)
 }
 
 installPatch.params = {
@@ -74,14 +74,14 @@ installPatch.resolve = {
 // -------------------------------------------------------------------
 
 async function handlePatchUpload (req, res, {pool}) {
-  const {headers: {['content-length']: contentLength}} = req
+  const contentLength = req.headers['content-length']
   if (!contentLength) {
     res.writeHead(411)
     res.end('Content length is mandatory')
     return
   }
 
-  await this.getXAPI(pool).uploadPoolPatch(req, contentLength)
+  await this.getXapi(pool).uploadPoolPatch(req, contentLength)
 }
 
 export async function uploadPatch ({pool}) {
@@ -110,7 +110,7 @@ export async function mergeInto ({ source, target, force }) {
     await this.mergeXenPools(source._xapiId, target._xapiId, force)
   } catch (e) {
     // FIXME: should we expose plain XAPI error messages?
-    throw new JsonRpcError(e.message)
+    throw new GenericError(e.message)
   }
 }
 
@@ -123,4 +123,23 @@ mergeInto.params = {
 mergeInto.resolve = {
   source: ['source', 'pool', 'administrate'],
   target: ['target', 'pool', 'administrate']
+}
+
+// -------------------------------------------------------------------
+
+export async function getLicenseState ({pool}) {
+  return this.getXapi(pool).call(
+    'pool.get_license_state',
+    pool._xapiId.$ref,
+  )
+}
+
+getLicenseState.params = {
+  pool: {
+    type: 'string'
+  }
+}
+
+getLicenseState.resolve = {
+  pool: ['pool', 'pool', 'administrate']
 }

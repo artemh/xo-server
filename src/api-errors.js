@@ -3,7 +3,7 @@ import {JsonRpcError} from 'json-rpc-peer'
 // ===================================================================
 
 // Export standard JSON-RPC errors.
-export {
+export { // eslint-disable-line no-duplicate-imports
   InvalidJson,
   InvalidParameters,
   InvalidRequest,
@@ -48,5 +48,23 @@ export class InvalidCredential extends JsonRpcError {
 export class AlreadyAuthenticated extends JsonRpcError {
   constructor () {
     super('already authenticated', 4)
+  }
+}
+
+// -------------------------------------------------------------------
+
+export class ForbiddenOperation extends JsonRpcError {
+  constructor (operation, reason) {
+    super(`forbidden operation: ${operation}`, 5, reason)
+  }
+}
+
+// -------------------------------------------------------------------
+
+// To be used with a user-readable message.
+// The message can be destined to be displayed to the front-end user.
+export class GenericError extends JsonRpcError {
+  constructor (message) {
+    super(message, 6)
   }
 }

@@ -13,7 +13,7 @@ export async function set ({
   name_description: nameDescription,
   name_label: nameLabel
 }) {
-  await this.getXAPI(sr).setSrProperties(sr._xapiId, {
+  await this.getXapi(sr).setSrProperties(sr._xapiId, {
     nameDescription,
     nameLabel
   })
@@ -34,7 +34,7 @@ set.resolve = {
 // -------------------------------------------------------------------
 
 export async function scan ({SR}) {
-  await this.getXAPI(SR).call('SR.scan', SR._xapiRef)
+  await this.getXapi(SR).call('SR.scan', SR._xapiRef)
 }
 
 scan.params = {
@@ -49,7 +49,7 @@ scan.resolve = {
 
 // TODO: find a way to call this "delete" and not destroy
 export async function destroy ({SR}) {
-  await this.getXAPI(SR).call('SR.destroy', SR._xapiRef)
+  await this.getXapi(SR).call('SR.destroy', SR._xapiRef)
 }
 
 destroy.params = {
@@ -63,7 +63,7 @@ destroy.resolve = {
 // -------------------------------------------------------------------
 
 export async function forget ({SR}) {
-  await this.getXAPI(SR).call('SR.forget', SR._xapiRef)
+  await this.getXapi(SR).call('SR.forget', SR._xapiRef)
 }
 
 forget.params = {
@@ -80,17 +80,24 @@ export async function createIso ({
   host,
   nameLabel,
   nameDescription,
-  path
+  path,
+  type,
+  user,
+  password
 }) {
-  const xapi = this.getXAPI(host)
+  const xapi = this.getXapi(host)
 
-  // FIXME: won't work for IPv6
-  // Detect if NFS or local path for ISO files
-  const deviceConfig = {location: path}
-  if (path.indexOf(':') === -1) { // not NFS share
-     // TODO: legacy will be removed in XAPI soon by FileSR
+  const deviceConfig = {}
+  if (type === 'local') {
     deviceConfig.legacy_mode = 'true'
+  } else if (type === 'smb') {
+    path = path.replace(/\\/g, '/')
+    deviceConfig.username = user
+    deviceConfig.cifspassword = password
   }
+
+  deviceConfig.location = path
+
   const srRef = await xapi.call(
     'SR.create',
     host._xapiRef,
@@ -112,7 +119,10 @@ createIso.params = {
   host: { type: 'string' },
   nameLabel: { type: 'string' },
   nameDescription: { type: 'string' },
-  path: { type: 'string' }
+  path: { type: 'string' },
+  type: { type: 'string' },
+  user: { type: 'string', optional: true },
+  password: { type: 'string', optional: true }
 }
 
 createIso.resolve = {
@@ -132,7 +142,7 @@ export async function createNfs ({
   serverPath,
   nfsVersion
 }) {
-  const xapi = this.getXAPI(host)
+  const xapi = this.getXapi(host)
 
   const deviceConfig = {
     server,
@@ -185,7 +195,7 @@ export async function createLvm ({
   nameDescription,
   device
 }) {
-  const xapi = this.getXAPI(host)
+  const xapi = this.getXapi(host)
 
   const deviceConfig = {
     device
@@ -227,7 +237,7 @@ export async function probeNfs ({
   host,
   server
 }) {
-  const xapi = this.getXAPI(host)
+  const xapi = this.getXapi(host)
 
   const deviceConfig = {
     server
@@ -290,7 +300,7 @@ export async function createIscsi ({
   chapUser,
   chapPassword
 }) {
-  const xapi = this.getXAPI(host)
+  const xapi = this.getXapi(host)
 
   const deviceConfig = {
     target,
@@ -353,7 +363,7 @@ export async function probeIscsiIqns ({
   chapUser,
   chapPassword
 }) {
-  const xapi = this.getXAPI(host)
+  const xapi = this.getXapi(host)
 
   const deviceConfig = {
     target: targetIp
@@ -430,7 +440,7 @@ export async function probeIscsiLuns ({
   chapUser,
   chapPassword
 }) {
-  const xapi = this.getXAPI(host)
+  const xapi = this.getXapi(host)
 
   const deviceConfig = {
     target: targetIp,
@@ -508,7 +518,7 @@ export async function probeIscsiExists ({
   chapUser,
   chapPassword
 }) {
-  const xapi = this.getXAPI(host)
+  const xapi = this.getXapi(host)
 
   const deviceConfig = {
     target: targetIp,
@@ -561,7 +571,7 @@ export async function probeNfsExists ({
   server,
   serverPath
 }) {
-  const xapi = this.getXAPI(host)
+  const xapi = this.getXapi(host)
 
   const deviceConfig = {
     server,
@@ -600,7 +610,7 @@ export async function reattach ({
   nameDescription,
   type
 }) {
-  const xapi = this.getXAPI(host)
+  const xapi = this.getXapi(host)
 
   if (type === 'iscsi') {
     type = 'lvmoiscsi' // the internal XAPI name
@@ -643,7 +653,7 @@ export async function reattachIso ({
   nameDescription,
   type
 }) {
-  const xapi = this.getXAPI(host)
+  const xapi = this.getXapi(host)
 
   if (type === 'iscsi') {
     type = 'lvmoiscsi' // the internal XAPI name

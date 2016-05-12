@@ -1,12 +1,12 @@
 export async function getAll () {
-  return await this.getAllRemotes()
+  return /* await */ this.getAllRemotes()
 }
 
 getAll.permission = 'admin'
 getAll.description = 'Gets all existing fs remote points'
 
-export async function get (id) {
-  return await this.getRemote(id)
+export async function get ({id}) {
+  return /* await */ this.getRemote(id)
 }
 
 get.permission = 'admin'
@@ -15,8 +15,8 @@ get.params = {
   id: {type: 'string'}
 }
 
-export async function list (id) {
-  return await this.listRemote(id)
+export async function list ({id}) {
+  return /* await */ this.listRemoteBackups(id)
 }
 
 list.permission = 'admin'
@@ -26,7 +26,7 @@ list.params = {
 }
 
 export async function create ({name, url}) {
-  return await this.createRemote({name, url})
+  return /* await */ this.createRemote({name, url})
 }
 
 create.permission = 'admin'
@@ -47,22 +47,6 @@ set.params = {
   name: {type: 'string', optional: true},
   url: {type: 'string', optional: true},
   enabled: {type: 'boolean', optional: true}
-}
-
-export async function importVm ({id, file, host}) {
-  await this.importVmFromRemote(id, file, host)
-}
-
-importVm.permission = 'admin'
-importVm.description = 'Imports a VM into host, from a file found in the chosen remote'
-importVm.params = {
-  id: {type: 'string'},
-  file: {type: 'string'},
-  host: {type: 'string'}
-}
-
-importVm.resolve = {
-  host: ['host', 'host', 'administrate']
 }
 
 async function delete_ ({id}) {

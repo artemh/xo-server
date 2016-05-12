@@ -1,5 +1,5 @@
 export async function get ({namespace}) {
-  const logger = this.getLogger(namespace)
+  const logger = await this.getLogger(namespace)
 
   return new Promise((resolve, reject) => {
     const logs = {}
@@ -16,3 +16,13 @@ export async function get ({namespace}) {
 }
 
 get.description = 'returns logs list for one namespace'
+
+async function delete_ ({namespace, id}) {
+  const logger = await this.getLogger(namespace)
+  logger.del(id)
+}
+
+delete_.description = 'deletes on or several logs from a namespace'
+delete_.permission = 'admin'
+
+export {delete_ as delete}

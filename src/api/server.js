@@ -1,16 +1,20 @@
-import { noop } from '../utils'
+import {
+  noop,
+  pCatch
+} from '../utils'
 
 export async function add ({
   host,
   username,
   password,
+  readOnly,
   autoConnect = true
 }) {
-  const server = await this.registerXenServer({host, username, password})
+  const server = await this.registerXenServer({host, username, password, readOnly})
 
   if (autoConnect) {
     // Connect asynchronously, ignore any errors.
-    this.connectXenServer(server.id).catch(noop)
+    this.connectXenServer(server.id)::pCatch(noop)
   }
 
   return server.id
@@ -56,14 +60,8 @@ remove.params = {
 
 // TODO: remove this function when users are integrated to the main
 // collection.
-export async function getAll () {
-  const servers = await this._servers.get()
-
-  for (let i = 0, n = servers.length; i < n; ++i) {
-    servers[i] = this.getServerPublicProperties(servers[i])
-  }
-
-  return servers
+export function getAll () {
+  return this.getAllXenServers()
 }
 
 getAll.description = 'returns all the registered Xen server'
@@ -72,8 +70,8 @@ getAll.permission = 'admin'
 
 // -------------------------------------------------------------------
 
-export async function set ({id, host, username, password}) {
-  await this.updateXenServer(id, {host, username, password})
+export async function set ({id, host, username, password, readOnly}) {
+  await this.updateXenServer(id, {host, username, password, readOnly})
 }
 
 set.description = 'changes the properties of a Xen server'
@@ -101,7 +99,7 @@ set.params = {
 // -------------------------------------------------------------------
 
 export async function connect ({id}) {
-  this.updateXenServer(id, {enabled: true}).catch(noop)
+  this.updateXenServer(id, {enabled: true})::pCatch(noop)
   await this.connectXenServer(id)
 }
 
@@ -118,7 +116,7 @@ connect.params = {
 // -------------------------------------------------------------------
 
 export async function disconnect ({id}) {
-  this.updateXenServer(id, {enabled: false}).catch(noop)
+  this.updateXenServer(id, {enabled: false})::pCatch(noop)
   await this.disconnectXenServer(id)
 }
 

@@ -1,3 +1,4 @@
+$assign = require 'lodash.assign'
 $debug = (require 'debug') 'xo:api:vm'
 $filter = require 'lodash.filter'
 $findIndex = require 'lodash.findindex'
@@ -6,21 +7,24 @@ $isArray = require 'lodash.isarray'
 endsWith = require 'lodash.endswith'
 escapeStringRegexp = require 'escape-string-regexp'
 eventToPromise = require 'event-to-promise'
-got = require('got')
 sortBy = require 'lodash.sortby'
 startsWith = require 'lodash.startswith'
 {coroutine: $coroutine} = require 'bluebird'
 {format} = require 'json-rpc-peer'
 
 {
-  JsonRpcError,
+  GenericError,
   Unauthorized
 } = require('../api-errors')
 {
   forEach,
   formatXml: $js2xml,
+  map,
   mapToArray,
+  noop,
+  parseSize,
   parseXml,
+  pCatch,
   pFinally
 } = require '../utils'
 {isVmRunning: $isVMRunning} = require('../xapi')
@@ -51,6 +55,7 @@ checkPermissionOnSrs = (vm, permission = 'operate') -> (
 
 # TODO: Implement ACLs
 create = $coroutine ({
+  resourceSet
   installation
   name_description
   name_label
@@ -58,21 +63,111 @@ create = $coroutine ({
   pv_args
   VDIs
   VIFs
+  existingDisks
 }) ->
-  vm = yield @getXAPI(template).createVm(template._xapiId, {
+  { user } = this
+  unless user
+    throw new Unauthorized()
+
+  limits = {
+    cpus: template.CPUs.number,
+    disk: 0,
+    memory: template.memory.size,
+    vms: 1
+  }
+  objectIds = [
+    template.id
+  ]
+
+  xapiVdis = VDIs and map(VDIs, (vdi) =>
+    sr = @getObject(vdi.SR)
+    size = parseSize(vdi.size)
+
+    objectIds.push(sr.id)
+    limits.disk += size
+
+    return $assign({}, vdi, {
+      device: vdi.device ? vdi.position,
+      size,
+      SR: sr._xapiId,
+      type: vdi.type
+    })
+  )
+
+  xapi = @getXapi(template)
+
+  diskSizesByDevice = {}
+
+  forEach(xapi.getObject(template._xapiId).$VBDs, (vbd) =>
+    if (
+      vbd.type is 'Disk' and
+      (vdi = vbd.$VDI)
+    )
+      diskSizesByDevice[vbd.device] = +vdi.virtual_size
+
+    return
+  )
+
+  xapiExistingVdis = existingDisks and map(existingDisks, (vdi, device) =>
+    if vdi.size?
+      size = parseSize(vdi.size)
+      diskSizesByDevice[device] = size
+
+    if vdi.$SR
+      sr = @getObject(vdi.$SR)
+      objectIds.push(sr.id)
+
+    return $assign({}, vdi, {
+      size,
+      $SR: sr and sr._xapiId
+    })
+  )
+
+  forEach(diskSizesByDevice, (size) => limits.disk += size)
+
+  xapiVifs = VIFs and map(VIFs, (vif) =>
+    network = @getObject(vif.network)
+
+    objectIds.push(network.id)
+
+    return {
+      mac: vif.mac
+      network: network._xapiId
+    }
+  )
+
+  if resourceSet
+    yield this.checkResourceSetConstraints(resourceSet, user.id, objectIds)
+    yield this.allocateLimitsInResourceSet(limits, resourceSet)
+  else unless user.permission is 'admin'
+    throw new Unauthorized()
+
+  xapiVm = yield xapi.createVm(template._xapiId, {
     installRepository: installation && installation.repository,
     nameDescription: name_description,
     nameLabel: name_label,
     pvArgs: pv_args,
-    vdis: VDIs,
-    vifs: VIFs
+    vdis: xapiVdis,
+    vifs: xapiVifs,
+    existingVdis: xapiExistingVdis
   })
 
-  return vm.$id
+  vm = xapi.xo.addObject(xapiVm)
 
-create.permission = 'admin'
+  if resourceSet
+    yield Promise.all([
+      @addAcl(user.id, vm.id, 'admin'),
+      xapi.xo.setData(xapiVm.$id, 'resourceSet', resourceSet)
+    ])
+
+  return vm.id
 
 create.params = {
+  resourceSet: {
+    type: 'string',
+    optional: true
+  },
+
   installation: {
     type: 'object'
     optional: true
@@ -105,7 +200,7 @@ create.params = {
         # UUID of the network to create the interface in.
         network: { type: 'string' }
 
-        MAC: {
+        mac: {
           optional: true # Auto-generated per default.
           type: 'string'
         }
@@ -121,9 +216,30 @@ create.params = {
       type: 'object'
       properties: {
         device: { type: 'string' }
-        size: { type: 'integer' }
+        size: { type: ['integer', 'string'] }
         SR: { type: 'string' }
         type: { type: 'string' }
+      }
+    }
+  }
+
+  # TODO: rename to *existingVdis* or rename *VDIs* to *disks*.
+  existingDisks: {
+    optional: true,
+    type: 'object',
+
+    # Do not for a type object.
+    items: {
+      type: 'object',
+      properties: {
+        size: {
+          type: ['integer', 'string'],
+          optional: true
+        },
+        $SR: {
+          type: 'string',
+          optional: true
+        }
       }
     }
   }
@@ -138,7 +254,33 @@ exports.create = create
 #---------------------------------------------------------------------
 
 delete_ = ({vm, delete_disks: deleteDisks}) ->
-  return @getXAPI(vm).deleteVm(vm._xapiId, deleteDisks)
+  cpus = vm.CPUs.number
+  memory = vm.memory.size
+
+  xapi = @getXapi(vm)
+
+  resourceSet = xapi.xo.getData(vm._xapiId, 'resourceSet')
+  if resourceSet?
+    disk = 0
+    vdis = {}
+    forEach(vm.$VBDs, (vbd) =>
+      if (
+        vbd.type is 'Disk' and
+        (vdi = vbd.$VDI) and
+        not vdis[vdi.$id]
+      )
+        vdis[vdi.$id] = true
+        disk += +vdi.virtual_size
+
+      return
+    )
+
+    pCatch.call(@releaseLimitsInResourceSet(
+      @computeVmResourcesUsage(vm),
+      resourceSet
+    ), noop)
+
+  return xapi.deleteVm(vm._xapiId, deleteDisks)
 
 delete_.params = {
   id: { type: 'string' }
@@ -157,7 +299,7 @@ exports.delete = delete_
 #---------------------------------------------------------------------
 
 ejectCd = $coroutine ({vm}) ->
-  yield @getXAPI(vm).ejectCdFromVm(vm._xapiId)
+  yield @getXapi(vm).ejectCdFromVm(vm._xapiId)
   return
 
 ejectCd.params = {
@@ -172,7 +314,7 @@ exports.ejectCd = ejectCd
 #---------------------------------------------------------------------
 
 insertCd = $coroutine ({vm, vdi, force}) ->
-  yield @getXAPI(vm).insertCdIntoVm(vdi._xapiId, vm._xapiId, {force})
+  yield @getXapi(vm).insertCdIntoVm(vdi._xapiId, vm._xapiId, {force})
   return
 
 insertCd.params = {
@@ -189,82 +331,94 @@ exports.insertCd = insertCd
 
 #---------------------------------------------------------------------
 
-migrate = $coroutine ({vm, host}) ->
-  yield @getXAPI(vm).migrateVm(vm._xapiId, @getXAPI(host), host._xapiId)
+migrate = $coroutine ({
+  vm,
+  host,
+  mapVdisSrs,
+  mapVifsNetworks,
+  migrationNetwork
+}) ->
+  permissions = []
+
+  if mapVdisSrs
+    mapVdisSrsXapi = {}
+    forEach mapVdisSrs, (srId, vdiId) =>
+      vdiXapiId = @getObject(vdiId, 'VDI')._xapiId
+      mapVdisSrsXapi[vdiXapiId] = @getObject(srId, 'SR')._xapiId
+      permissions.push([
+        srId,
+        'administrate'
+      ])
+
+  if mapVifsNetworks
+    mapVifsNetworksXapi = {}
+    forEach mapVifsNetworks, (networkId, vifId) =>
+      vifXapiId = @getObject(vifId, 'VIF')._xapiId
+      mapVifsNetworksXapi[vifXapiId] = @getObject(networkId, 'network')._xapiId
+      permissions.push([
+        networkId,
+        'administrate'
+      ])
+
+  unless yield @hasPermissions(@session.get('user_id'), permissions)
+    throw new Unauthorized()
+
+  yield @getXapi(vm).migrateVm(vm._xapiId, @getXapi(host), host._xapiId, {
+    migrationNetworkId: migrationNetwork?._xapiId
+    mapVifsNetworks: mapVifsNetworksXapi,
+    mapVdisSrs: mapVdisSrsXapi,
+  })
   return
 
 migrate.params = {
+
   # Identifier of the VM to migrate.
-  id: { type: 'string' }
+  vm: { type: 'string' }
 
   # Identifier of the host to migrate to.
-  host_id: { type: 'string' }
+  targetHost: { type: 'string' }
+
+  # Map VDIs IDs --> SRs IDs
+  mapVdisSrs: { type: 'object', optional: true }
+
+  # Map VIFs IDs --> Networks IDs
+  mapVifsNetworks: { type: 'object', optional: true }
+
+  # Identifier of the Network use for the migration
+  migrationNetwork: { type: 'string', optional: true }
 }
 
 migrate.resolve = {
-  vm: ['id', 'VM']
-  host: ['host_id', 'host', 'administrate']
+  vm: ['vm', 'VM', 'administrate'],
+  host: ['targetHost', 'host', 'administrate'],
+  migrationNetwork: ['migrationNetwork', 'network', 'administrate'],
 }
 
 exports.migrate = migrate
 
 #---------------------------------------------------------------------
 
-migratePool = $coroutine ({
-  vm,
-  host
-  sr
-  network
-  migrationNetwork
-}) ->
-  yield @getXAPI(vm).migrateVm(vm._xapiId, @getXAPI(host), host._xapiId, {
-    migrationNetworkId: migrationNetwork?._xapiId
-    networkId: network?._xapiId,
-    srId: sr?._xapiId,
-  })
-  return
-
-migratePool.params = {
-
-  # Identifier of the VM to migrate.
-  id: { type: 'string' }
-
-  # Identifier of the host to migrate to.
-  target_host_id: { type: 'string' }
-
-  # Identifier of the target SR
-  target_sr_id: { type: 'string', optional: true }
-
-  # Identifier of the target Network
-  target_network_id: { type: 'string', optional: true }
-
-  # Identifier of the Network use for the migration
-  migration_network_id: { type: 'string', optional: true }
-}
-
-migratePool.resolve = {
-  vm: ['id', 'VM', 'administrate'],
-  host: ['target_host_id', 'host', 'administrate'],
-  sr: ['target_sr_id', 'SR', 'administrate'],
-  network: ['target_network_id', 'network', 'administrate'],
-  migrationNetwork: ['migration_network_id', 'network', 'administrate'],
-}
-
-# TODO: camel case.
-exports.migrate_pool = migratePool
-
-#---------------------------------------------------------------------
-
 # FIXME: human readable strings should be handled.
 set = $coroutine (params) ->
   {VM} = params
-  xapi = @getXAPI VM
+  xapi = @getXapi VM
 
   {_xapiRef: ref} = VM
 
+  resourceSet = xapi.xo.getData(ref, 'resourceSet')
+
+  if 'memoryMin' of params
+    memoryMin = parseSize(params.memoryMin)
+    yield xapi.call 'VM.set_memory_static_min', ref, "#{memoryMin}"
+    yield xapi.call 'VM.set_memory_dynamic_min', ref, "#{memoryMin}"
+
+  if 'memoryMax' of params
+    memoryMax = parseSize(params.memoryMax)
+    yield xapi.call 'VM.set_memory_static_max', ref, "#{memoryMax}"
+
   # Memory.
   if 'memory' of params
-    {memory} = params
+    memory = parseSize(params.memory)
 
     if memory < VM.memory.static[0]
       @throw(
@@ -279,16 +433,22 @@ set = $coroutine (params) ->
           "for a running VM"
       )
 
-    if memory < VM.memory.dynamic[0]
-      yield xapi.call 'VM.set_memory_dynamic_min', ref, "#{memory}"
-    else if memory > VM.memory.static[1]
+    if memory > VM.memory.static[1]
       yield xapi.call 'VM.set_memory_static_max', ref, "#{memory}"
+    if resourceSet?
+      yield @allocateLimitsInResourceSet({
+        memory: memory - VM.memory.size
+      }, resourceSet)
     yield xapi.call 'VM.set_memory_dynamic_max', ref, "#{memory}"
 
   # Number of CPUs.
   if 'CPUs' of params
     {CPUs} = params
 
+    if resourceSet?
+      yield @allocateLimitsInResourceSet({
+        cpus: CPUs - VM.CPUs.number
+      }, resourceSet)
     if $isVMRunning VM
       if CPUs > VM.CPUs.max
         @throw(
@@ -301,6 +461,9 @@ set = $coroutine (params) ->
       if CPUs > VM.CPUs.max
         yield xapi.call 'VM.set_VCPUs_max', ref, "#{CPUs}"
       yield xapi.call 'VM.set_VCPUs_at_startup', ref, "#{CPUs}"
+
+  if 'cpusMax' of params
+    yield xapi.call 'VM.set_VCPUs_max', ref, "#{CPUs}"
 
   # HA policy
   # TODO: also handle "best-effort" case
@@ -317,9 +480,14 @@ set = $coroutine (params) ->
 
     if auto_poweron
       yield xapi.call 'VM.add_to_other_config', ref, 'auto_poweron', 'true'
-      yield xapi.setPoolProperties({autoPowerOn: true})
+      yield xapi.setPoolProperties({autoPoweron: true})
     else
       yield xapi.call 'VM.remove_from_other_config', ref, 'auto_poweron'
+
+  if 'cpuWeight' of params
+    if resourceSet? and this.user.permission isnt 'admin'
+      throw new Unauthorized()
+    yield xapi.setVcpuWeight(VM._xapiId, params.cpuWeight)
 
   # Other fields.
   for param, fields of {
@@ -351,13 +519,23 @@ set.params = {
   # Number of virtual CPUs to allocate.
   CPUs: { type: 'integer', optional: true }
 
+  cpusMax: { type: ['integer', 'string'], optional: true }
+
   # Memory to allocate (in bytes).
   #
   # Note: static_min ≤ dynamic_min ≤ dynamic_max ≤ static_max
-  memory: { type: 'integer', optional: true }
+  memory: { type: ['integer', 'string'], optional: true }
+
+  # Set static_min & dynamic_min
+  memoryMin: { type: ['integer', 'string'], optional: true }
+
+  # Set static_max
+  memoryMax: { type: ['integer', 'string'], optional: true }
 
   # Kernel arguments for PV VM.
   PV_args: { type: 'string', optional: true }
+
+  cpuWeight: { type: 'integer', optional: true}
 }
 
 set.resolve = {
@@ -369,7 +547,7 @@ exports.set = set
 #---------------------------------------------------------------------
 
 restart = $coroutine ({vm, force}) ->
-  xapi = @getXAPI(vm)
+  xapi = @getXapi(vm)
 
   if force
     yield xapi.call 'VM.hard_reboot', vm._xapiRef
@@ -391,10 +569,11 @@ exports.restart = restart
 
 #---------------------------------------------------------------------
 
+# TODO: implement resource sets
 clone = $coroutine ({vm, name, full_copy}) ->
   yield checkPermissionOnSrs.call(this, vm)
 
-  return @getXAPI(vm).cloneVm(vm._xapiRef, {
+  return @getXapi(vm).cloneVm(vm._xapiRef, {
     nameLabel: name,
     fast: not full_copy
   }).then((vm) -> vm.$id)
@@ -414,6 +593,7 @@ exports.clone = clone
 
 #---------------------------------------------------------------------
 
+# TODO: implement resource sets
 copy = $coroutine ({
   compress,
   name: nameLabel,
@@ -424,11 +604,11 @@ copy = $coroutine ({
     if vm.power_state is 'Running'
       yield checkPermissionOnSrs.call(this, vm)
 
-    return @getXAPI(vm).copyVm(vm._xapiId, sr._xapiId, {
+    return @getXapi(vm).copyVm(vm._xapiId, sr._xapiId, {
       nameLabel
     }).then((vm) -> vm.$id)
 
-  return @getXAPI(vm).remoteCopyVm(vm._xapiId, @getXAPI(sr), sr._xapiId, {
+  return @getXapi(vm).remoteCopyVm(vm._xapiId, @getXapi(sr), sr._xapiId, {
     compress,
     nameLabel
   }).then((vm) -> vm.$id)
@@ -455,27 +635,36 @@ exports.copy = copy
 
 #---------------------------------------------------------------------
 
-# TODO: rename convertToTemplate()
-convert = $coroutine ({vm}) ->
-  yield @getXAPI(vm).call 'VM.set_is_a_template', vm._xapiRef, true
+convertToTemplate = $coroutine ({vm}) ->
+  # Convert to a template requires pool admin permission.
+  unless yield @hasPermissions(@session.get('user_id'), [
+    [ vm.$pool, 'administrate' ]
+  ])
+    throw new Unauthorized()
+
+  yield @getXapi(vm).call 'VM.set_is_a_template', vm._xapiRef, true
 
   return true
 
-convert.params = {
+convertToTemplate.params = {
   id: { type: 'string' }
 }
 
-convert.resolve = {
+convertToTemplate.resolve = {
   vm: ['id', ['VM', 'VM-snapshot'], 'administrate']
 }
-exports.convert = convert
+exports.convertToTemplate = convertToTemplate
+
+# TODO: remove when no longer used.
+exports.convert = convertToTemplate
 
 #---------------------------------------------------------------------
 
+# TODO: implement resource sets
 snapshot = $coroutine ({vm, name}) ->
   yield checkPermissionOnSrs.call(this, vm)
 
-  snapshot = yield @getXAPI(vm).snapshotVm(vm._xapiRef, name)
+  snapshot = yield @getXapi(vm).snapshotVm(vm._xapiRef, name)
   return snapshot.$id
 
 snapshot.params = {
@@ -487,6 +676,66 @@ snapshot.resolve = {
   vm: ['id', 'VM', 'administrate']
 }
 exports.snapshot = snapshot
+
+#---------------------------------------------------------------------
+
+rollingDeltaBackup = $coroutine ({vm, remote, tag, depth}) ->
+  return yield @rollingDeltaVmBackup({
+    vm,
+    remoteId: remote,
+    tag,
+    depth
+  })
+
+rollingDeltaBackup.params = {
+  id: { type: 'string' }
+  remote: { type: 'string' }
+  tag: { type: 'string'}
+  depth: { type: ['string', 'number'] }
+}
+
+rollingDeltaBackup.resolve = {
+  vm: ['id', ['VM', 'VM-snapshot'], 'administrate']
+}
+
+rollingDeltaBackup.permission = 'admin'
+
+exports.rollingDeltaBackup = rollingDeltaBackup
+
+#---------------------------------------------------------------------
+
+importDeltaBackup = ({sr, remote, filePath}) ->
+  return @importDeltaVmBackup({sr, remoteId: remote, filePath})
+
+importDeltaBackup.params = {
+  sr: { type: 'string' }
+  remote: { type: 'string' }
+  filePath: { type: 'string' }
+}
+
+importDeltaBackup.resolve = {
+  sr: [ 'sr', 'SR', 'operate' ]
+}
+
+importDeltaBackup.permission = 'admin'
+
+exports.importDeltaBackup = importDeltaBackup
+
+#---------------------------------------------------------------------
+
+deltaCopy = ({ vm, sr }) -> @deltaCopyVm(vm, sr)
+
+deltaCopy.params = {
+  id: { type: 'string' },
+  sr: { type: 'string' }
+}
+
+deltaCopy.resolve = {
+  vm: [ 'id', 'VM', 'operate'],
+  sr: [ 'sr', 'SR', 'operate']
+}
+
+exports.deltaCopy = deltaCopy
 
 #---------------------------------------------------------------------
 
@@ -510,12 +759,15 @@ exports.rollingSnapshot = rollingSnapshot
 
 #---------------------------------------------------------------------
 
-backup = $coroutine ({vm, pathToFile, compress, onlyMetadata}) ->
-  yield @backupVm({vm, pathToFile, compress, onlyMetadata})
+backup = $coroutine ({vm, remoteId, file, compress, onlyMetadata}) ->
+  yield @backupVm({vm, remoteId, file, compress, onlyMetadata})
+
+backup.permission = 'admin'
 
 backup.params = {
-  id: { type: 'string' }
-  pathToFile: { type: 'string' }
+  id: {type: 'string'}
+  remoteId: { type: 'string' }
+  file: { type: 'string' }
   compress: { type: 'boolean', optional: true }
   onlyMetadata: { type: 'boolean', optional: true }
 }
@@ -530,20 +782,39 @@ exports.backup = backup
 
 #---------------------------------------------------------------------
 
+importBackup = $coroutine ({remote, file, sr}) ->
+  yield @importVmBackup(remote, file, sr)
+  return
+
+importBackup.permission = 'admin'
+importBackup.description = 'Imports a VM into host, from a file found in the chosen remote'
+importBackup.params = {
+  remote: {type: 'string'},
+  file: {type: 'string'},
+  sr: {type: 'string'}
+}
+
+importBackup.resolve = {
+  sr: [ 'sr', 'SR', 'operate' ]
+}
+
+importBackup.permission = 'admin'
+
+exports.importBackup = importBackup
+
+#---------------------------------------------------------------------
+
 rollingBackup = $coroutine ({vm, remoteId, tag, depth, compress, onlyMetadata}) ->
-  remote = yield @getRemote remoteId
-  if not remote?.path?
-    throw new Error "No such Remote #{remoteId}"
-  if not remote.enabled
-    throw new Error "Backup remote #{remoteId} is disabled"
   return yield @rollingBackupVm({
     vm,
-    path: remote.path,
+    remoteId,
     tag,
     depth,
     compress,
     onlyMetadata
   })
+
+rollingBackup.permission = 'admin'
 
 rollingBackup.params = {
   id: { type: 'string' }
@@ -565,7 +836,7 @@ exports.rollingBackup = rollingBackup
 
 rollingDrCopy = ({vm, pool, tag, depth}) ->
   if vm.$pool is pool.id
-    throw new JsonRpcError('Disaster Recovery attempts to copy on the same pool')
+    throw new GenericError('Disaster Recovery attempts to copy on the same pool')
   return @rollingDrCopyVm({vm, sr: @getObject(pool.default_SR, 'SR'), tag, depth})
 
 rollingDrCopy.params = {
@@ -587,7 +858,7 @@ exports.rollingDrCopy = rollingDrCopy
 #---------------------------------------------------------------------
 
 start = ({vm}) ->
-  return @getXAPI(vm).startVm(vm._xapiId)
+  return @getXapi(vm).startVm(vm._xapiId)
 
 start.params = {
   id: { type: 'string' }
@@ -606,7 +877,7 @@ exports.start = start
 # - if force is true → hard shutdown
 # - if force is integer → clean shutdown and after force seconds, hard shutdown.
 stop = $coroutine ({vm, force}) ->
-  xapi = @getXAPI vm
+  xapi = @getXapi vm
 
   # Hard shutdown
   if force
@@ -639,7 +910,7 @@ exports.stop = stop
 #---------------------------------------------------------------------
 
 suspend = $coroutine ({vm}) ->
-  yield @getXAPI(vm).call 'VM.suspend', vm._xapiRef
+  yield @getXapi(vm).call 'VM.suspend', vm._xapiRef
 
   return true
 
@@ -659,7 +930,7 @@ resume = $coroutine ({vm, force}) ->
   if not force
     force = true
 
-  yield @getXAPI(vm).call 'VM.resume', vm._xapiRef, false, force
+  yield @getXapi(vm).call 'VM.resume', vm._xapiRef, false, force
 
   return true
 
@@ -678,7 +949,7 @@ exports.resume = resume
 # revert a snapshot to its parent VM
 revert = $coroutine ({snapshot}) ->
   # Attempts a revert from this snapshot to its parent VM
-  yield @getXAPI(snapshot).call 'VM.revert', snapshot._xapiRef
+  yield @getXapi(snapshot).call 'VM.revert', snapshot._xapiRef
 
   return true
 
@@ -698,17 +969,16 @@ handleExport = $coroutine (req, res, {xapi, id, compress, onlyMetadata}) ->
     compress: compress ? true,
     onlyMetadata: onlyMetadata ? false
   })
-  upstream = stream.response
   res.on('close', () ->
     stream.cancel()
   )
   # Remove the filename as it is already part of the URL.
-  upstream.headers['content-disposition'] = 'attachment'
+  stream.headers['content-disposition'] = 'attachment'
 
   res.writeHead(
-    upstream.statusCode,
-    upstream.statusMessage ? '',
-    upstream.headers
+    stream.statusCode,
+    stream.statusMessage ? '',
+    stream.headers
   )
   stream.pipe(res)
   return
@@ -719,7 +989,7 @@ export_ = $coroutine ({vm, compress, onlyMetadata}) ->
     yield checkPermissionOnSrs.call(this, vm)
 
   data = {
-    xapi: @getXAPI(vm),
+    xapi: @getXapi(vm),
     id: vm._xapiId,
     compress,
     onlyMetadata
@@ -744,40 +1014,50 @@ exports.export = export_;
 
 #---------------------------------------------------------------------
 
-handleVmImport = $coroutine (req, res, { xapi }) ->
+handleVmImport = $coroutine (req, res, { xapi, srId }) ->
   # Timeout seems to be broken in Node 4.
   # See https://github.com/nodejs/node/issues/3319
   req.setTimeout(43200000) # 12 hours
 
-  contentLength = req.headers['content-length']
-  if !contentLength
-    res.writeHead(411)
-    res.end('Content length is mandatory')
-    return
-
   try
-    vm = yield xapi.importVm(req, contentLength)
+    vm = yield xapi.importVm(req, { srId })
     res.end(format.response(0, vm.$id))
   catch e
     res.writeHead(500)
-    res.end(format.error(new JsonRpcError(e.message)))
+    res.end(format.error(0, new GenericError(e.message)))
 
   return
 
 # TODO: "sr_id" can be passed in URL to target a specific SR
-import_ = $coroutine ({host}) ->
-  xapi = @getXAPI(host)
+import_ = $coroutine ({host, sr}) ->
+  if not sr
+    if not host
+      throw new InvalidParameters('you must provide either host or SR')
+
+    xapi = @getXapi(host)
+    sr = xapi.pool.$default_SR
+    if not sr
+      throw new InvalidParameters('there is not default SR in this pool')
+
+    # FIXME: must have administrate permission on default SR.
+  else
+    xapi = @getXapi(sr)
 
   return {
-    $sendTo: yield @registerHttpRequest(handleVmImport, { xapi })
+    $sendTo: yield @registerHttpRequest(handleVmImport, {
+      srId: sr._xapiId,
+      xapi
+    })
   }
 
 import_.params = {
-  host: { type: 'string' }
+  host: { type: 'string', optional: true },
+  sr: { type: 'string', optional: true }
 }
 
 import_.resolve = {
-  host: ['host', 'host', 'administrate']
+  host: ['host', 'host', 'administrate'],
+  sr: ['sr', 'SR', 'administrate']
 }
 exports.import = import_
 
@@ -786,7 +1066,7 @@ exports.import = import_
 # FIXME: if position is used, all other disks after this position
 # should be shifted.
 attachDisk = $coroutine ({vm, vdi, position, mode, bootable}) ->
-  yield @getXAPI(vm).attachVdiToVm(vdi._xapiId, vm._xapiId, {
+  yield @getXapi(vm).attachVdiToVm(vdi._xapiId, vm._xapiId, {
     bootable,
     position,
     readOnly: mode is 'RO'
@@ -814,8 +1094,9 @@ exports.attachDisk = attachDisk
 
 # FIXME: position should be optional and default to last.
 
+# TODO: implement resource sets
 createInterface = $coroutine ({vm, network, position, mtu, mac}) ->
-  vif = yield @getXAPI(vm).createVif(vm._xapiId, network._xapiId, {
+  vif = yield @getXapi(vm).createVif(vm._xapiId, network._xapiId, {
     mac,
     mtu,
     position
@@ -840,7 +1121,7 @@ exports.createInterface = createInterface
 #---------------------------------------------------------------------
 
 attachPci = $coroutine ({vm, pciId}) ->
-  xapi = @getXAPI vm
+  xapi = @getXapi vm
 
   yield xapi.call 'VM.add_to_other_config', vm._xapiRef, 'pci', pciId
 
@@ -860,7 +1141,7 @@ exports.attachPci = attachPci
 #---------------------------------------------------------------------
 
 detachPci = $coroutine ({vm}) ->
-  xapi = @getXAPI vm
+  xapi = @getXapi vm
 
   yield xapi.call 'VM.remove_from_other_config', vm._xapiRef, 'pci'
 
@@ -900,7 +1181,7 @@ exports.stats = stats;
 #---------------------------------------------------------------------
 
 setBootOrder = $coroutine ({vm, order}) ->
-  xapi = @getXAPI vm
+  xapi = @getXapi vm
 
   order = {order: order}
   if vm.virtualizationMode == 'hvm'
@@ -925,7 +1206,7 @@ exports.setBootOrder = setBootOrder
 #---------------------------------------------------------------------
 
 recoveryStart = ({vm}) ->
-  return @getXAPI(vm).startVmOnCd(vm._xapiId)
+  return @getXapi(vm).startVmOnCd(vm._xapiId)
 
 recoveryStart.params = {
   id: { type: 'string' }
@@ -939,7 +1220,7 @@ exports.recoveryStart = recoveryStart
 #---------------------------------------------------------------------
 
 getCloudInitConfig = $coroutine ({template}) ->
-  return yield @getXAPI(template).getCloudInitConfig(template._xapiId)
+  return yield @getXapi(template).getCloudInitConfig(template._xapiId)
 
 getCloudInitConfig.params = {
   template: { type: 'string' }
@@ -952,9 +1233,14 @@ exports.getCloudInitConfig = getCloudInitConfig
 
 #---------------------------------------------------------------------
 
-createCloudInitConfigDrive = $coroutine ({vm, sr, config}) ->
-  xapi = @getXAPI vm
-  yield xapi.createCloudInitConfigDrive(vm._xapiId, sr._xapiId, config)
+createCloudInitConfigDrive = $coroutine ({vm, sr, config, coreos}) ->
+  xapi = @getXapi vm
+  # CoreOS is a special CloudConfig drive created by XS plugin
+  if coreos
+    yield xapi.createCoreOsCloudInitConfigDrive(vm._xapiId, sr._xapiId, config)
+  # use generic Cloud Init drive
+  else
+    yield xapi.createCloudInitConfigDrive(vm._xapiId, sr._xapiId, config)
   return true
 
 createCloudInitConfigDrive.params = {
@@ -965,7 +1251,10 @@ createCloudInitConfigDrive.params = {
 
 createCloudInitConfigDrive.resolve = {
   vm: ['vm', 'VM', 'administrate'],
-  sr: [ 'sr', 'SR', 'operate' ]
+
+  # Not compatible with resource sets.
+  # FIXME: find a workaround.
+  sr: [ 'sr', 'SR', '' ] # 'operate' ]
 }
 exports.createCloudInitConfigDrive = createCloudInitConfigDrive
 
