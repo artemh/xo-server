@@ -1020,7 +1020,12 @@ handleVmImport = $coroutine (req, res, { xapi, srId }) ->
   req.setTimeout(43200000) # 12 hours
 
   try
-    vm = yield xapi.importVm(req, { srId })
+    promise = xapi.importVm(req, contentLength)
+    res.on('close', () ->
+      promise.cancel()
+    )
+    vm = yield promise
+
     res.end(format.response(0, vm.$id))
   catch e
     res.writeHead(500)
