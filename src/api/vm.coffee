@@ -275,10 +275,10 @@ delete_ = ({vm, delete_disks: deleteDisks}) ->
       return
     )
 
-    @releaseLimitsInResourceSet(
+    pCatch.call(@releaseLimitsInResourceSet(
       @computeVmResourcesUsage(vm),
       resourceSet
-    )::pCatch(noop)
+    ), noop)
 
   return xapi.deleteVm(vm._xapiId, deleteDisks)
 
@@ -407,6 +407,15 @@ set = $coroutine (params) ->
 
   resourceSet = xapi.xo.getData(ref, 'resourceSet')
 
+  if 'memoryMin' of params
+    memoryMin = parseSize(params.memoryMin)
+    yield xapi.call 'VM.set_memory_static_min', ref, "#{memoryMin}"
+    yield xapi.call 'VM.set_memory_dynamic_min', ref, "#{memoryMin}"
+
+  if 'memoryMax' of params
+    memoryMax = parseSize(params.memoryMax)
+    yield xapi.call 'VM.set_memory_static_max', ref, "#{memoryMax}"
+
   # Memory.
   if 'memory' of params
     memory = parseSize(params.memory)
@@ -424,9 +433,7 @@ set = $coroutine (params) ->
           "for a running VM"
       )
 
-    if memory < VM.memory.dynamic[0]
-      yield xapi.call 'VM.set_memory_dynamic_min', ref, "#{memory}"
-    else if memory > VM.memory.static[1]
+    if memory > VM.memory.static[1]
       yield xapi.call 'VM.set_memory_static_max', ref, "#{memory}"
     if resourceSet?
       yield @allocateLimitsInResourceSet({
@@ -455,6 +462,9 @@ set = $coroutine (params) ->
         yield xapi.call 'VM.set_VCPUs_max', ref, "#{CPUs}"
       yield xapi.call 'VM.set_VCPUs_at_startup', ref, "#{CPUs}"
 
+  if 'cpusMax' of params
+    yield xapi.call 'VM.set_VCPUs_max', ref, "#{CPUs}"
+
   # HA policy
   # TODO: also handle "best-effort" case
   if 'high_availability' of params
@@ -470,7 +480,7 @@ set = $coroutine (params) ->
 
     if auto_poweron
       yield xapi.call 'VM.add_to_other_config', ref, 'auto_poweron', 'true'
-      yield xapi.setPoolProperties({autoPowerOn: true})
+      yield xapi.setPoolProperties({autoPoweron: true})
     else
       yield xapi.call 'VM.remove_from_other_config', ref, 'auto_poweron'
 
@@ -509,10 +519,18 @@ set.params = {
   # Number of virtual CPUs to allocate.
   CPUs: { type: 'integer', optional: true }
 
+  cpusMax: { type: ['integer', 'string'], optional: true }
+
   # Memory to allocate (in bytes).
   #
   # Note: static_min ≤ dynamic_min ≤ dynamic_max ≤ static_max
   memory: { type: ['integer', 'string'], optional: true }
+
+  # Set static_min & dynamic_min
+  memoryMin: { type: ['integer', 'string'], optional: true }
+
+  # Set static_max
+  memoryMax: { type: ['integer', 'string'], optional: true }
 
   # Kernel arguments for PV VM.
   PV_args: { type: 'string', optional: true }
@@ -670,14 +688,14 @@ rollingDeltaBackup = $coroutine ({vm, remote, tag, depth}) ->
   })
 
 rollingDeltaBackup.params = {
-  vm: { type: 'string' }
+  id: { type: 'string' }
   remote: { type: 'string' }
   tag: { type: 'string'}
   depth: { type: ['string', 'number'] }
 }
 
 rollingDeltaBackup.resolve = {
-  vm: ['vm', ['VM', 'VM-snapshot'], 'administrate']
+  vm: ['id', ['VM', 'VM-snapshot'], 'administrate']
 }
 
 rollingDeltaBackup.permission = 'admin'
@@ -708,12 +726,12 @@ exports.importDeltaBackup = importDeltaBackup
 deltaCopy = ({ vm, sr }) -> @deltaCopyVm(vm, sr)
 
 deltaCopy.params = {
-  vm: { type: 'string' },
+  id: { type: 'string' },
   sr: { type: 'string' }
 }
 
 deltaCopy.resolve = {
-  vm: [ 'vm', 'VM', 'operate'],
+  vm: [ 'id', 'VM', 'operate'],
   sr: [ 'sr', 'SR', 'operate']
 }
 

@@ -1,3 +1,5 @@
+/* eslint-disable camelcase */
+
 import createDebug from 'debug'
 import every from 'lodash.every'
 import fatfs from 'fatfs'
@@ -8,6 +10,7 @@ import includes from 'lodash.includes'
 import pickBy from 'lodash.pickby'
 import sortBy from 'lodash.sortby'
 import unzip from 'julien-f-unzip'
+import { defer } from 'promise-toolbox'
 import { utcFormat, utcParse } from 'd3-time-format'
 import {
   wrapError as wrapXapiError,
@@ -112,6 +115,10 @@ const asBoolean = value => Boolean(value)
 //     : value
 // }
 const asInteger = value => String(value)
+
+const optional = (value, fn) => value == null
+  ? undefined
+  : fn ? fn(value) : value
 
 const filterUndefineds = obj => pickBy(obj, value => value !== undefined)
 
@@ -243,6 +250,16 @@ export default class Xapi extends XapiBase {
     this.objects.on('update', onAddOrUpdate)
   }
 
+  call (...args) {
+    const fn = super.call
+
+    const loop = () => fn.apply(this, args)::pCatch({
+      code: 'TOO_MANY_PENDING_TASKS'
+    }, () => pDelay(5e3).then(loop))
+
+    return loop()
+  }
+
   // =================================================================
 
   _registerGenericWatcher (fn) {
@@ -264,8 +281,7 @@ export default class Xapi extends XapiBase {
   // TODO: implements a timeout.
   _waitObject (predicate) {
     if (isFunction(predicate)) {
-      let resolve
-      const promise = new Promise(resolve_ => resolve = resolve_)
+      const { promise, resolve } = defer()
 
       const unregister = this._registerGenericWatcher(obj => {
         if (predicate(obj)) {
@@ -280,10 +296,7 @@ export default class Xapi extends XapiBase {
 
     let watcher = this._objectWatchers[predicate]
     if (!watcher) {
-      let resolve
-      const promise = new Promise(resolve_ => {
-        resolve = resolve_
-      })
+      const { promise, resolve } = defer()
 
       // Register the watcher.
       watcher = this._objectWatchers[predicate] = {
@@ -293,6 +306,22 @@ export default class Xapi extends XapiBase {
     }
 
     return watcher.promise
+  }
+
+  // Wait for an object to be in a given state.
+  //
+  // Faster than _waitObject() with a function.
+  _waitObjectState (idOrUuidOrRef, predicate) {
+    const object = this.getObject(idOrUuidOrRef)
+    if (object && predicate(object)) {
+      return object
+    }
+
+    const loop = () => this._waitObject(idOrUuidOrRef).then(
+      (object) => predicate(object) ? object : loop()
+    )
+
+    return loop()
   }
 
   // Returns the objects if already presents or waits for it.
@@ -326,18 +355,8 @@ export default class Xapi extends XapiBase {
 
     let watcher = this._taskWatchers[ref]
     if (!watcher) {
-      let resolve, reject
-      const promise = new Promise((resolve_, reject_) => {
-        resolve = resolve_
-        reject = reject_
-      })
-
       // Register the watcher.
-      watcher = this._taskWatchers[ref] = {
-        promise,
-        resolve,
-        reject
-      }
+      watcher = this._taskWatchers[ref] = defer()
     }
 
     return watcher.promise
@@ -408,8 +427,8 @@ export default class Xapi extends XapiBase {
         nameLabel,
         nameDescription
       }),
-      this._updateObjectMapProperty(pool, 'other_config', {
-        autoPoweron
+      autoPoweron != null && this._updateObjectMapProperty(pool, 'other_config', {
+        autoPoweron: autoPoweron ? 'on' : null
       })
     ])
   }
@@ -731,6 +750,37 @@ export default class Xapi extends XapiBase {
     }
   }
 
+  async _getHostToSrPbd (host, sr) {
+    const pbd = find(host.$PBDs, { SR: sr.$ref })
+    if (pbd) {
+      return
+    }
+
+    const template = sr.$PBDs[0]
+    if (!template) {
+      throw new JsonRpcError('no existing PBD can be used as a template')
+    }
+
+    return await this.call({
+      device_config: template.device_config,
+      host: host.$ref,
+      SR: sr.$ref
+    })
+  }
+
+  async connectHostToSr (hostId, srId) {
+    const host = this.getObject(hostId)
+    const sr = this.getObject(srId)
+
+    const pbd = await this._getHostToSrPbd(host, sr)
+    if (pbd.correctly_attached) {
+      throw new JsonRpcError('host already connected to SR', {
+        host: host.$id,
+        sr: sr.$id
+      })
+    }
+  }
+
   async emergencyShutdownHost (hostId) {
     const host = this.getObject(hostId)
     const vms = host.$resident_VMs
@@ -835,7 +885,7 @@ export default class Xapi extends XapiBase {
     }`)
 
     try {
-      return /* await */ this.call(
+      return await this.call(
         'VM.copy',
         snapshotRef || vm.$ref,
         nameLabel,
@@ -843,7 +893,7 @@ export default class Xapi extends XapiBase {
       )
     } finally {
       if (snapshotRef) {
-        await this.deleteVm(
+        await this._deleteVm(
           await this._getOrWaitObject(snapshotRef),
           true
         )
@@ -862,6 +912,8 @@ export default class Xapi extends XapiBase {
     try {
       ref = await this.call('VM.snapshot_with_quiesce', vm.$ref, nameLabel)
       this.addTag(ref, 'quiesce')::pCatch(noop) // ignore any failures
+
+      await this._waitObjectState(ref, vm => includes(vm.tags, 'quiesce'))
     } catch (error) {
       if (
         error.code !== 'VM_SNAPSHOT_WITH_QUIESCE_NOT_SUPPORTED' &&
@@ -1016,11 +1068,11 @@ export default class Xapi extends XapiBase {
       generation_id,
       ha_always_run: asBoolean(ha_always_run),
       ha_restart_priority,
-      hardware_platform_version,
+      hardware_platform_version: optional(hardware_platform_version, asInteger),
       // HVM_shadow_multiplier: asFloat(HVM_shadow_multiplier), // FIXME: does not work FIELD_TYPE_ERROR(hVM_shadow_multiplier)
       name_description,
       name_label,
-      order,
+      order: optional(order, asInteger),
       protection_policy,
       shutdown_delay: asInteger(shutdown_delay),
       start_delay: asInteger(start_delay),
@@ -1122,25 +1174,24 @@ export default class Xapi extends XapiBase {
     }
 
     // Modify existing (previous template) disks if necessary
-    const this_ = this // Work around http://phabricator.babeljs.io/T7172
     existingVdis && await Promise.all(mapToArray(existingVdis, async ({ size, $SR: srId, ...properties }, userdevice) => {
       const vbd = find(vm.$VBDs, { userdevice })
       if (!vbd) {
         return
       }
       const vdi = vbd.$VDI
-      await this_._setObjectProperties(vdi, properties)
+      await this._setObjectProperties(vdi, properties)
 
       // if the disk is bigger
       if (
         size != null &&
         size > vdi.virtual_size
       ) {
-        await this_.resizeVdi(vdi.$id, size)
+        await this.resizeVdi(vdi.$id, size)
       }
       // if another SR is set, move it there
       if (srId) {
-        await this_.moveVdi(vdi.$id, srId)
+        await this.moveVdi(vdi.$id, srId)
       }
     }))
 
@@ -1304,7 +1355,7 @@ export default class Xapi extends XapiBase {
     const baseVdis = {}
     baseVm && forEach(baseVm.$VBDs, vbd => {
       const vdi = vbd.$VDI
-      if (!find(fullVdisRequired, id => vdi.$snapshot_of.$id === id)) {
+      if (vdi && !find(fullVdisRequired, id => vdi.$snapshot_of.$id === id)) {
         baseVdis[vbd.VDI] = vdi
       }
     })
@@ -1357,10 +1408,7 @@ export default class Xapi extends XapiBase {
       vifs[vif.$ref] = vif
     })
 
-    return {
-      // TODO: make non-enumerable?
-      streams: await streams::pAll(),
-
+    return Object.defineProperty({
       version: '1.0.0',
       vbds,
       vdis,
@@ -1374,7 +1422,9 @@ export default class Xapi extends XapiBase {
           }
         }
         : vm
-    }
+    }, 'streams', {
+      value: await streams::pAll()
+    })
   }
 
   @deferrable.onFailure
@@ -2137,14 +2187,17 @@ export default class Xapi extends XapiBase {
       vdi: vdi.$ref
     }
 
-    const host = vdi.$SR.$PBDs[0].$host
+    const pbd = find(vdi.$SR.$PBDs, 'currently_attached')
+    if (!pbd) {
+      throw new Error('no valid PBDs found')
+    }
 
     const task = this._watchTask(taskRef)
     await Promise.all([
       stream.checksumVerified,
       task,
       put(stream, {
-        hostname: host.address,
+        hostname: pbd.$host.address,
         method: 'put',
         path: '/import_raw_vdi/',
         query
