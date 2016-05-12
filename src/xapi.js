@@ -22,6 +22,7 @@ import {
 
 import httpRequest from './http-request'
 import {
+  cancellable,
   debounce,
   deferrable
 } from './decorators'
@@ -747,6 +748,37 @@ export default class Xapi extends XapiBase {
         await this._installPoolPatchOnHostAndRequirements(patch, host, installableByUuid)
         host = this.getObject(host.$id)
       }
+    }
+  }
+
+  async _getHostToSrPbd (host, sr) {
+    const pbd = find(host.$PBDs, { SR: sr.$ref })
+    if (pbd) {
+      return
+    }
+
+    const template = sr.$PBDs[0]
+    if (!template) {
+      throw new JsonRpcError('no existing PBD can be used as a template')
+    }
+
+    return await this.call({
+      device_config: template.device_config,
+      host: host.$ref,
+      SR: sr.$ref
+    })
+  }
+
+  async connectHostToSr (hostId, srId) {
+    const host = this.getObject(hostId)
+    const sr = this.getObject(srId)
+
+    const pbd = await this._getHostToSrPbd(host, sr)
+    if (pbd.correctly_attached) {
+      throw new JsonRpcError('host already connected to SR', {
+        host: host.$id,
+        sr: sr.$id
+      })
     }
   }
 
@@ -1602,11 +1634,60 @@ export default class Xapi extends XapiBase {
       { code: 'TOO_MANY_STORAGE_MIGRATES' },
       () => pDelay(1e4).then(loop)
     )
+  }
 
+  async _putVmWithoutLength (cancellation, hostname, stream, path, query) {
+    const request = httpRequest({
+      hostname,
+      method: 'PUT',
+      path: `${path}?${formatQueryString(query)}`
+    })
+    request.removeHeader('transfer-encoding')
+
+    cancellation.then(() => {
+      request.abort()
+    })
+
+    stream.pipe(request)
+
+    // An error can occur after the finish event and therefore will
+    // not be handled by eventToPromise().
+    //
+    // As a consequence, add an empty error handler to avoid a crash.
+    request.on('error', noop)
     return loop()
   }
 
-  async _importVm (stream, sr, onlyMetadata = false, onVmCreation = undefined) {
+  async _putVmWithLength (cancellation, hostname, stream, query, length) {
+    const responseStream = got.stream.put({
+      hostname,
+      path: '/import/'
+    }, {
+      body: stream,
+      headers: { 'content-length': length },
+      query
+    })
+
+    const request = await eventToPromise(responseStream, 'request')
+    request.on('end', () => console.log('Request end'))
+    request.on('close', () => console.log('Request close'))
+    request.on('error', () => console.log('Request error'))
+    request.on('abort', () => console.log('Request aborted'))
+    request.socket.on('end', () => console.log('Socket end'))
+    request.socket.on('close', () => console.log('Socket close'))
+    request.socket.on('error', () => console.log('Socket error'))
+    request.socket.on('abort', () => console.log('Request abort'))
+    cancellation.then(() => {
+      request.socket.destroy()
+      request.end()
+      request.abort()
+    }).catch(::console.error)
+
+    responseStream.resume()
+    await eventToPromise(responseStream, 'end')
+  }
+
+  async _importVm (cancellation, stream, length, sr, onlyMetadata = false, onVmCreation = undefined) {
     const taskRef = await this._createTask('VM import')
     const query = {
       force: onlyMetadata
@@ -1625,6 +1706,10 @@ export default class Xapi extends XapiBase {
     }
 
     const path = onlyMetadata ? '/import_metadata/' : '/import/'
+
+    const upload = length
+      ? this._putVmWithLength(cancellation, host.address, stream, query, length)
+      : this._putVmWithoutLength(cancellation, host.address, stream, path, query)
 
     if (onVmCreation) {
       this._waitObject(
@@ -1653,11 +1738,13 @@ export default class Xapi extends XapiBase {
   }
 
   // TODO: an XVA can contain multiple VMs
-  async importVm (stream, {
+  @cancellable
+  async importVm (cancellation, stream, length, {
     onlyMetadata = false,
     srId
   } = {}) {
-    return /* await */ this._getOrWaitObject(await this._importVm(
+    return await this._getOrWaitObject(await this._importVm(
+      cancellation,
       stream,
       srId && this.getObject(srId),
       onlyMetadata
