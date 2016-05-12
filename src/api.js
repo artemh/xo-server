@@ -2,7 +2,6 @@ import createDebug from 'debug'
 const debug = createDebug('xo:api')
 
 import getKeys from 'lodash.keys'
-import isFunction from 'lodash.isfunction'
 import kindOf from 'kindof'
 import ms from 'ms'
 import schemaInspector from 'schema-inspector'
@@ -14,12 +13,27 @@ import {
   Unauthorized
 } from './api-errors'
 import {
+  version as xoServerVersion
+} from '../package.json'
+import {
   createRawObject,
   forEach,
+  isFunction,
   noop
 } from './utils'
 
 // ===================================================================
+
+const PERMISSIONS = {
+  none: 0,
+  read: 1,
+  write: 2,
+  admin: 3
+}
+
+const hasPermission = (user, permission) => (
+  PERMISSIONS[user.permission] >= PERMISSIONS[permission]
+)
 
 // FIXME: this function is specific to XO and should not be defined in
 // this file.
@@ -43,7 +57,7 @@ function checkPermission (method) {
     return
   }
 
-  if (!user.hasPermission(permission)) {
+  if (!hasPermission(user, permission)) {
     throw new Unauthorized()
   }
 }
@@ -79,7 +93,7 @@ function resolveParams (method, params) {
     throw new Unauthorized()
   }
 
-  const userId = user.get('id')
+  const userId = user.id
 
   // Do not alter the original object.
   params = { ...params }
@@ -99,7 +113,12 @@ function resolveParams (method, params) {
     // Register this new value.
     params[key] = object
 
-    permissions.push([ object.id, permission ])
+    // Permission default to 'administrate' but can be set to a falsy
+    // value (except null or undefined which trigger the default
+    // value) to simply do a resolve without checking any permissions.
+    if (permission) {
+      permissions.push([ object.id, permission ])
+    }
   })
 
   return this.hasPermissions(userId, permissions).then(success => {
@@ -116,17 +135,22 @@ function resolveParams (method, params) {
 function getMethodsInfo () {
   const methods = {}
 
-  forEach(this.api._methods, function (method, name) {
-    this[name] = {
+  forEach(this.api._methods, (method, name) => {
+    methods[name] = {
       description: method.description,
       params: method.params || {},
       permission: method.permission
     }
-  }, methods)
+  })
 
   return methods
 }
 getMethodsInfo.description = 'returns the signatures of all available API methods'
+
+// -------------------------------------------------------------------
+
+const getServerVersion = () => xoServerVersion
+getServerVersion.description = 'return the version of xo-server'
 
 // -------------------------------------------------------------------
 
@@ -176,6 +200,7 @@ export default class Api {
     this.addMethods({
       system: {
         getMethodsInfo,
+        getServerVersion,
         getVersion,
         listMethods,
         methodSignature
@@ -201,7 +226,8 @@ export default class Api {
 
   addMethods (methods) {
     let base = ''
-    forEach(methods, function addMethod (method, name) {
+
+    const addMethod = (method, name) => {
       name = base + name
 
       if (isFunction(method)) {
@@ -211,9 +237,10 @@ export default class Api {
 
       const oldBase = base
       base = name + '.'
-      forEach(method, addMethod, this)
+      forEach(method, addMethod)
       base = oldBase
-    }, this)
+    }
+    forEach(methods, addMethod)
   }
 
   async call (session, name, params) {
@@ -238,13 +265,27 @@ export default class Api {
     // FIXME: too coupled with XO.
     // Fetch and inject the current user.
     const userId = session.get('user_id', undefined)
-    context.user = userId && await context._getUser(userId)
+    context.user = userId && await context.getUser(userId)
     const userName = context.user
-      ? context.user.get('email')
+      ? context.user.email
       : '(unknown user)'
 
     try {
       await checkPermission.call(context, method)
+
+      // API methods are in a namespace.
+      // Some methods use the namespace or an id parameter like:
+      //
+      // vm.detachPci vm=<string>
+      // vm.ejectCd id=<string>
+      //
+      // The goal here is to standardize the calls by always providing
+      // an id parameter when possible to simplify calls to the API.
+      if (params && params.id === undefined) {
+        const namespace = name.slice(0, name.indexOf('.'))
+        params.id = params[namespace]
+      }
+
       checkParams(method, params)
 
       const resolvedParams = await resolveParams.call(context, method, params)

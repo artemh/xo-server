@@ -3,7 +3,6 @@ $find = require 'lodash.find'
 $findIndex = require 'lodash.findindex'
 $forEach = require 'lodash.foreach'
 endsWith = require 'lodash.endswith'
-got = require('got')
 startsWith = require 'lodash.startswith'
 {coroutine: $coroutine} = require 'bluebird'
 {
@@ -171,9 +170,26 @@ exports.disable = disable
 
 #---------------------------------------------------------------------
 
+connectSr = ({host, sr}) ->
+  return @getXAPI(host).connectHostToSr(host.id, sr.id)
+
+connectSr.description = 'connect a SR to this host'
+
+connectSr.params = {
+  id: { type: 'string' }
+  srId: { type: 'string' }
+}
+
+connectSr.resolve = {
+  host: ['id', 'host', 'administrate']
+  sr: ['id', 'SR', 'administrate']
+}
+
+#---------------------------------------------------------------------
+
 # TODO: to test and to fix.
 createNetwork = $coroutine ({host, name, description, pif, mtu, vlan}) ->
-  xapi = @getXapi host
+  xapi = @getXAPI host
 
   description = description ? 'Created with Xen Orchestra'
 

@@ -1,5 +1,4 @@
 import createJsonSchemaValidator from 'is-my-json-valid'
-import isFunction from 'lodash.isfunction'
 
 import { PluginsMetadata } from '../models/plugin-metadata'
 import {
@@ -8,7 +7,7 @@ import {
 } from '../api-errors'
 import {
   createRawObject,
-  noop,
+  isFunction,
   mapToArray
 } from '../utils'
 
@@ -50,7 +49,8 @@ export default class {
   async registerPlugin (
     name,
     instance,
-    configurationSchema
+    configurationSchema,
+    version
   ) {
     const id = name
 
@@ -60,7 +60,8 @@ export default class {
       id,
       instance,
       name,
-      unloadable: isFunction(instance.unload)
+      unloadable: isFunction(instance.unload),
+      version
     }
 
     const metadata = await this._getPluginMetadata(id)
@@ -94,7 +95,9 @@ export default class {
           return this.loadPlugin(id)
         }
       })
-      .catch(noop)
+      .catch(error => {
+        console.error('register plugin %s: %s', name, error && error.stack || error)
+      })
   }
 
   async _getPlugin (id) {
@@ -102,7 +105,8 @@ export default class {
       configurationSchema,
       loaded,
       name,
-      unloadable
+      unloadable,
+      version
     } = this._getRawPlugin(id)
     const {
       autoload,
@@ -115,13 +119,14 @@ export default class {
       autoload,
       loaded,
       unloadable,
+      version,
       configuration,
       configurationSchema
     }
   }
 
   async getPlugins () {
-    return await Promise.all(
+    return /* await */ Promise.all(
       mapToArray(this._plugins, ({ id }) => this._getPlugin(id))
     )
   }

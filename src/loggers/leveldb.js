@@ -1,44 +1,41 @@
 import highland from 'highland'
 
-// See: https://en.wikipedia.org/wiki/Syslog#Severity_level
-const LEVELS = [
-  'emergency',
-  'alert',
-  'critical',
-  'error',
-  'warning',
-  'notice',
-  'informational',
-  'debug'
-]
+import AbstractLogger from './abstract'
+import { forEach, noop } from '../utils'
 
 let lastDate = 0
-let lastId = 0
+let increment = 0
 
 function generateUniqueKey (date) {
-  lastId = (date === lastDate) ? (lastId + 1) : 0
-  lastDate = date
+  if (date === lastDate) {
+    return `${date}:${increment++}`
+  }
 
-  return `${lastDate}:${lastId}`
+  increment = 0
+  return String(lastDate = date)
 }
 
-export default class LevelDbLogger {
+export default class LevelDbLogger extends AbstractLogger {
   constructor (db, namespace) {
+    super()
+
     this._db = db
     this._namespace = namespace
   }
 
   _add (level, message, data) {
+    const time = Date.now()
+
     const log = {
       level,
       message,
       data,
       namespace: this._namespace,
-      time: Date.now()
+      time
     }
 
-    const key = generateUniqueKey(log.time)
-    this._db.put(key, log)
+    const key = generateUniqueKey(time)
+    this._db.putSync(key, log)
     return key
   }
 
@@ -46,13 +43,17 @@ export default class LevelDbLogger {
     return highland(this._db.createReadStream())
       .filter(({value}) => value.namespace === this._namespace)
   }
-}
 
-// Create high level log methods.
-for (const level of LEVELS) {
-  Object.defineProperty(LevelDbLogger.prototype, level, {
-    value (message, data) {
-      return this._add(level, message, data)
+  del (id) {
+    if (!Array.isArray(id)) {
+      id = [id]
     }
-  })
+    forEach(id, id => {
+      this._db.get(id).then(value => {
+        if (value.namespace === this._namespace) {
+          this._db.delSync(id, noop)
+        }
+      })
+    })
+  }
 }

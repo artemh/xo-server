@@ -1,4 +1,4 @@
-import {JsonRpcError} from '../api-errors'
+import {GenericError} from '../api-errors'
 
 // ===================================================================
 
@@ -74,7 +74,7 @@ installPatch.resolve = {
 // -------------------------------------------------------------------
 
 async function handlePatchUpload (req, res, {pool}) {
-  const {headers: {['content-length']: contentLength}} = req
+  const contentLength = req.headers['content-length']
   if (!contentLength) {
     res.writeHead(411)
     res.end('Content length is mandatory')
@@ -110,7 +110,7 @@ export async function mergeInto ({ source, target, force }) {
     await this.mergeXenPools(source._xapiId, target._xapiId, force)
   } catch (e) {
     // FIXME: should we expose plain XAPI error messages?
-    throw new JsonRpcError(e.message)
+    throw new GenericError(e.message)
   }
 }
 
@@ -123,4 +123,23 @@ mergeInto.params = {
 mergeInto.resolve = {
   source: ['source', 'pool', 'administrate'],
   target: ['target', 'pool', 'administrate']
+}
+
+// -------------------------------------------------------------------
+
+export async function getLicenseState ({pool}) {
+  return this.getXapi(pool).call(
+    'pool.get_license_state',
+    pool._xapiId.$ref,
+  )
+}
+
+getLicenseState.params = {
+  pool: {
+    type: 'string'
+  }
+}
+
+getLicenseState.resolve = {
+  pool: ['pool', 'pool', 'administrate']
 }

@@ -1,6 +1,8 @@
 import Collection from '../collection/redis'
 import Model from '../model'
-import { forEach } from '../utils'
+import {
+  forEach
+} from '../utils'
 
 // ===================================================================
 
@@ -25,7 +27,7 @@ export class Remotes extends Collection {
   }
 
   async save (remote) {
-    return await this.update(remote)
+    return /* await */ this.update(remote)
   }
 
   async get (properties) {

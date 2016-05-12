@@ -1,10 +1,8 @@
-import includes from 'lodash.includes'
-import isArray from 'lodash.isarray'
-
 import {
   ensureArray,
   extractProperty,
   forEach,
+  isArray,
   mapToArray,
   parseXml
 } from './utils'
@@ -37,18 +35,28 @@ function link (obj, prop, idField = '$id') {
 
 // Parse a string date time to a Unix timestamp (in seconds).
 //
+// If the value is a number or can be converted as one, it is assumed
+// to already be a timestamp and returned.
+//
 // If there are no data or if the timestamp is 0, returns null.
 function toTimestamp (date) {
   if (!date) {
     return null
   }
 
-  const ms = parseDateTime(date).getTime()
+  const timestamp = +date
+
+  // Not NaN.
+  if (timestamp === timestamp) { // eslint-disable-line no-self-compare
+    return timestamp
+  }
+
+  const ms = parseDateTime(date)
   if (!ms) {
     return null
   }
 
-  return Math.round(ms / 1000)
+  return Math.round(ms.getTime() / 1000)
 }
 
 // ===================================================================
@@ -87,14 +95,22 @@ const TRANSFORMS = {
     const isRunning = isHostRunning(obj)
 
     return {
+      // Deprecated
+      CPUs: obj.cpu_info,
+
       address: obj.address,
       bios_strings: obj.bios_strings,
       build: obj.software_version.build_number,
-      CPUs: obj.cpu_info,
       enabled: Boolean(obj.enabled),
+      cpus: {
+        cores: +obj.cpu_info.cpu_count,
+        sockets: +obj.cpu_info.socket_count
+      },
       current_operations: obj.current_operations,
       hostname: obj.hostname,
       iSCSI_name: otherConfig.iscsi_iqn || null,
+      license_params: obj.license_params,
+      license_server: obj.license_server,
       name_description: obj.name_description,
       name_label: obj.name_label,
       memory: (function () {
@@ -115,7 +131,11 @@ const TRANSFORMS = {
       })(),
       patches: link(obj, 'patches'),
       powerOnMode: obj.power_on_mode,
-      power_state: isRunning ? 'Running' : 'Halted',
+      power_state: metrics
+        ? (isRunning ? 'Running' : 'Halted')
+        : 'Unknown',
+      startTime: toTimestamp(otherConfig.boot_time),
+      agentStartTime: toTimestamp(otherConfig.agent_start_time),
       tags: obj.tags,
       version: obj.software_version.product_version,
 
@@ -228,8 +248,8 @@ const TRANSFORMS = {
       other: otherConfig,
       os_version: guestMetrics && guestMetrics.os_version || null,
       power_state: obj.power_state,
-      snapshot_time: toTimestamp(obj.snapshot_time),
       snapshots: link(obj, 'snapshots'),
+      startTime: metrics && toTimestamp(metrics.start_time),
       tags: obj.tags,
       VIFs: link(obj, 'VIFs'),
       virtualizationMode: isHvm ? 'hvm' : 'pv',
@@ -277,6 +297,7 @@ const TRANSFORMS = {
     } else if (obj.is_a_snapshot) {
       vm.type += '-snapshot'
 
+      vm.snapshot_time = toTimestamp(obj.snapshot_time)
       vm.$snapshot_of = link(obj, 'snapshot_of')
     } else if (obj.is_a_template) {
       vm.type += '-template'
@@ -301,14 +322,16 @@ const TRANSFORMS = {
           return disks
         })(),
         install_methods: (function () {
-          const {['install-methods']: methods} = otherConfig
+          const methods = otherConfig['install-methods']
 
           return methods ? methods.split(',') : []
         })(),
         install_repository: otherConfig['install-repository']
       }
-    } else if (includes(obj.current_operations, 'migrate_send')) {
-      vm.id = obj.$ref
+    }
+
+    if (obj.VCPUs_params && obj.VCPUs_params.weight) {
+      vm.cpuWeight = obj.VCPUs_params.weight
     }
 
     if (!isHvm) {
@@ -325,9 +348,12 @@ const TRANSFORMS = {
       type: 'SR',
 
       content_type: obj.content_type,
+
+      // TODO: Should it replace usage?
+      physical_usage: +obj.physical_utilisation,
+
       name_description: obj.name_description,
       name_label: obj.name_label,
-      physical_usage: +obj.physical_utilisation,
       size: +obj.physical_size,
       SR_type: obj.type,
       tags: obj.tags,
@@ -363,20 +389,19 @@ const TRANSFORMS = {
 
       attached: Boolean(obj.currently_attached),
       device: obj.device,
-      IP: obj.IP,
-      MAC: obj.MAC,
+      dns: obj.DNS,
+      disallowUnplug: Boolean(obj.disallow_unplug),
+      gateway: obj.gateway,
+      ip: obj.IP,
+      mac: obj.MAC,
       management: Boolean(obj.management), // TODO: find a better name.
       mode: obj.ip_configuration_mode,
-      MTU: +obj.MTU,
+      mtu: +obj.MTU,
       netmask: obj.netmask,
+      // A non physical PIF is a "copy" of an existing physical PIF (same device)
+      // A physical PIF cannot be unplugged
+      physical: Boolean(obj.physical),
       vlan: +obj.VLAN,
-
-      // TODO: What is it?
-      //
-      // Could it mean “is this a physical interface?”.
-      // How could a PIF not be physical?
-      // physical: obj.physical,
-
       $host: link(obj, 'host'),
       $network: link(obj, 'network')
     }
@@ -384,27 +409,32 @@ const TRANSFORMS = {
 
   // -----------------------------------------------------------------
 
-  // TODO: should we have a VDI-snapshot type like we have with VMs?
   vdi (obj) {
     if (!obj.managed) {
       return
     }
 
-    return {
+    const vdi = {
       type: 'VDI',
 
       name_description: obj.name_description,
       name_label: obj.name_label,
       size: +obj.virtual_size,
       snapshots: link(obj, 'snapshots'),
-      snapshot_time: toTimestamp(obj.snapshot_time),
       tags: obj.tags,
       usage: +obj.physical_utilisation,
 
-      $snapshot_of: link(obj, 'snapshot_of'),
       $SR: link(obj, 'SR'),
       $VBDs: link(obj, 'VBDs')
     }
+
+    if (obj.is_a_snapshot) {
+      vdi.type += '-snapshot'
+      vdi.snapshot_time = toTimestamp(obj.snapshot_time)
+      vdi.$snapshot_of = link(obj, 'snapshot_of')
+    }
+
+    return vdi
   },
 
   // -----------------------------------------------------------------

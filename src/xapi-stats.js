@@ -1,8 +1,8 @@
 import endsWith from 'lodash.endswith'
-import got from 'got'
 import JSON5 from 'json5'
 import { BaseError } from 'make-error'
 
+import httpRequest from './http-request'
 import { parseDateTime } from './xapi'
 
 const RRD_STEP_SECONDS = 5
@@ -32,11 +32,7 @@ export class UnknownLegendFormat extends XapiStatsError {
   }
 }
 
-export class FaultyGranularity extends XapiStatsError {
-  constructor (msg) {
-    super(msg)
-  }
-}
+export class FaultyGranularity extends XapiStatsError {}
 
 // -------------------------------------------------------------------
 // Utils
@@ -391,8 +387,8 @@ export default class XapiStats {
   // Execute one http request on a XenServer for get stats
   // Return stats (Json format) or throws got exception
   async _getJson (url) {
-    const response = await got(url, { rejectUnauthorized: false })
-    return JSON5.parse(response.body)
+    const body = await httpRequest(url, { rejectUnauthorized: false }).readAll()
+    return JSON5.parse(body)
   }
 
   async _getLastTimestamp (xapi, host, step) {
@@ -405,19 +401,24 @@ export default class XapiStats {
   }
 
   _getPoints (hostname, step, vmId) {
+    const hostStats = this._hosts[hostname][step]
+
     // Return host points
     if (vmId === undefined) {
-      return this._hosts[hostname][step]
+      return {
+        interval: step,
+        ...hostStats
+      }
     }
+
+    const vmsStats = this._vms[hostname][step]
 
     // Return vm points
-    const points = { endTimestamp: this._hosts[hostname][step].endTimestamp }
-
-    if (this._vms[hostname][step] !== undefined) {
-      points.stats = this._vms[hostname][step][vmId]
+    return {
+      interval: step,
+      endTimestamp: hostStats.endTimestamp,
+      stats: (vmsStats && vmsStats[vmId]) || getNewVmStats()
     }
-
-    return points
   }
 
   async _getAndUpdatePoints (xapi, host, vmId, granularity) {
@@ -528,6 +529,11 @@ export default class XapiStats {
   async getVmPoints (xapi, vmId, granularity) {
     const vm = xapi.getObject(vmId)
     const host = vm.$resident_on
+
+    if (!host) {
+      throw new Error(`VM ${vmId} is halted or host could not be found.`)
+    }
+
     return this._getAndUpdatePoints(xapi, host, vm.uuid, granularity)
   }
 }
