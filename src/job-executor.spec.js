@@ -3,8 +3,11 @@
 import {expect} from 'chai'
 import leche from 'leche'
 
-import {mergeObjects} from './job-executor'
-import {_computeCrossProduct} from './job-executor'
+import {
+  mergeObjects,
+  _computeCrossProduct,
+  productParams
+} from './job-executor'
 
 describe('productParams', function () {
   leche.withData({
