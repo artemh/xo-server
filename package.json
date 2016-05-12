@@ -76,7 +76,7 @@
     "leveldown": "=1.4.4",
     "lodash.assign": "^4.0.9",
     "lodash.bind": "^4.1.4",
-    "lodash.difference": "^4.1.0",
+    "lodash.difference": "^4.3.0",
     "lodash.endswith": "^4.0.0",
     "lodash.every": "^4.0.0",
     "lodash.filter": "^4.2.0",
