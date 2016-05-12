@@ -78,7 +78,7 @@
     "lodash.bind": "^4.1.4",
     "lodash.difference": "^4.3.0",
     "lodash.endswith": "^4.1.0",
-    "lodash.every": "^4.0.0",
+    "lodash.every": "^4.4.0",
     "lodash.filter": "^4.2.0",
     "lodash.find": "^4.2.0",
     "lodash.findindex": "^4.2.0",
