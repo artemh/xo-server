@@ -1,3 +1,5 @@
+/* eslint-disable camelcase */
+
 import createDebug from 'debug'
 import every from 'lodash.every'
 import fatfs from 'fatfs'
@@ -8,6 +10,7 @@ import includes from 'lodash.includes'
 import pickBy from 'lodash.pickby'
 import sortBy from 'lodash.sortby'
 import unzip from 'julien-f-unzip'
+import { defer } from 'promise-toolbox'
 import { utcFormat, utcParse } from 'd3-time-format'
 import {
   wrapError as wrapXapiError,
@@ -16,9 +19,9 @@ import {
 import {
   satisfies as versionSatisfies
 } from 'semver'
-
 import httpRequest from './http-request'
 import {
+  cancellable,
   debounce,
   deferrable
 } from './decorators'
@@ -42,7 +45,8 @@ import {
   pDelay,
   pFinally,
   promisifyAll,
-  pSettle
+  pSettle,
+  pDebug
 } from './utils'
 import {
   GenericError,
@@ -112,6 +116,10 @@ const asBoolean = value => Boolean(value)
 //     : value
 // }
 const asInteger = value => String(value)
+
+const optional = (value, fn) => value == null
+  ? undefined
+  : fn ? fn(value) : value
 
 const filterUndefineds = obj => pickBy(obj, value => value !== undefined)
 
@@ -243,6 +251,16 @@ export default class Xapi extends XapiBase {
     this.objects.on('update', onAddOrUpdate)
   }
 
+  call (...args) {
+    const fn = super.call
+
+    const loop = () => fn.apply(this, args)::pCatch({
+      code: 'TOO_MANY_PENDING_TASKS'
+    }, () => pDelay(5e3).then(loop))
+
+    return loop()
+  }
+
   // =================================================================
 
   _registerGenericWatcher (fn) {
@@ -264,8 +282,7 @@ export default class Xapi extends XapiBase {
   // TODO: implements a timeout.
   _waitObject (predicate) {
     if (isFunction(predicate)) {
-      let resolve
-      const promise = new Promise(resolve_ => resolve = resolve_)
+      const { promise, resolve } = defer()
 
       const unregister = this._registerGenericWatcher(obj => {
         if (predicate(obj)) {
@@ -280,10 +297,7 @@ export default class Xapi extends XapiBase {
 
     let watcher = this._objectWatchers[predicate]
     if (!watcher) {
-      let resolve
-      const promise = new Promise(resolve_ => {
-        resolve = resolve_
-      })
+      const { promise, resolve } = defer()
 
       // Register the watcher.
       watcher = this._objectWatchers[predicate] = {
@@ -293,6 +307,22 @@ export default class Xapi extends XapiBase {
     }
 
     return watcher.promise
+  }
+
+  // Wait for an object to be in a given state.
+  //
+  // Faster than _waitObject() with a function.
+  _waitObjectState (idOrUuidOrRef, predicate) {
+    const object = this.getObject(idOrUuidOrRef)
+    if (object && predicate(object)) {
+      return object
+    }
+
+    const loop = () => this._waitObject(idOrUuidOrRef).then(
+      (object) => predicate(object) ? object : loop()
+    )
+
+    return loop()
   }
 
   // Returns the objects if already presents or waits for it.
@@ -326,18 +356,8 @@ export default class Xapi extends XapiBase {
 
     let watcher = this._taskWatchers[ref]
     if (!watcher) {
-      let resolve, reject
-      const promise = new Promise((resolve_, reject_) => {
-        resolve = resolve_
-        reject = reject_
-      })
-
       // Register the watcher.
-      watcher = this._taskWatchers[ref] = {
-        promise,
-        resolve,
-        reject
-      }
+      watcher = this._taskWatchers[ref] = defer()
     }
 
     return watcher.promise
@@ -731,6 +751,37 @@ export default class Xapi extends XapiBase {
     }
   }
 
+  async _getHostToSrPbd (host, sr) {
+    const pbd = find(host.$PBDs, { SR: sr.$ref })
+    if (pbd) {
+      return
+    }
+
+    const template = sr.$PBDs[0]
+    if (!template) {
+      throw new JsonRpcError('no existing PBD can be used as a template')
+    }
+
+    return await this.call({
+      device_config: template.device_config,
+      host: host.$ref,
+      SR: sr.$ref
+    })
+  }
+
+  async connectHostToSr (hostId, srId) {
+    const host = this.getObject(hostId)
+    const sr = this.getObject(srId)
+
+    const pbd = await this._getHostToSrPbd(host, sr)
+    if (pbd.correctly_attached) {
+      throw new JsonRpcError('host already connected to SR', {
+        host: host.$id,
+        sr: sr.$id
+      })
+    }
+  }
+
   async emergencyShutdownHost (hostId) {
     const host = this.getObject(hostId)
     const vms = host.$resident_VMs
@@ -862,6 +913,8 @@ export default class Xapi extends XapiBase {
     try {
       ref = await this.call('VM.snapshot_with_quiesce', vm.$ref, nameLabel)
       this.addTag(ref, 'quiesce')::pCatch(noop) // ignore any failures
+
+      await this._waitObjectState(ref, vm => includes(vm.tags, 'quiesce'))
     } catch (error) {
       if (
         error.code !== 'VM_SNAPSHOT_WITH_QUIESCE_NOT_SUPPORTED' &&
@@ -1016,11 +1069,11 @@ export default class Xapi extends XapiBase {
       generation_id,
       ha_always_run: asBoolean(ha_always_run),
       ha_restart_priority,
-      hardware_platform_version,
+      hardware_platform_version: optional(hardware_platform_version, asInteger),
       // HVM_shadow_multiplier: asFloat(HVM_shadow_multiplier), // FIXME: does not work FIELD_TYPE_ERROR(hVM_shadow_multiplier)
       name_description,
       name_label,
-      order,
+      order: optional(order, asInteger),
       protection_policy,
       shutdown_delay: asInteger(shutdown_delay),
       start_delay: asInteger(start_delay),
@@ -1356,10 +1409,7 @@ export default class Xapi extends XapiBase {
       vifs[vif.$ref] = vif
     })
 
-    return {
-      // TODO: make non-enumerable?
-      streams: await streams::pAll(),
-
+    return Object.defineProperty({
       version: '1.0.0',
       vbds,
       vdis,
@@ -1373,7 +1423,9 @@ export default class Xapi extends XapiBase {
           }
         }
         : vm
-    }
+    }, 'streams', {
+      value: await streams::pAll()
+    })
   }
 
   @deferrable.onFailure
@@ -1582,11 +1634,60 @@ export default class Xapi extends XapiBase {
       { code: 'TOO_MANY_STORAGE_MIGRATES' },
       () => pDelay(1e4).then(loop)
     )
+  }
 
+  async _putVmWithoutLength (cancellation, hostname, stream, path, query) {
+    const request = httpRequest({
+      hostname,
+      method: 'PUT',
+      path: `${path}?${formatQueryString(query)}`
+    })
+    request.removeHeader('transfer-encoding')
+
+    cancellation.then(() => {
+      request.abort()
+    })
+
+    stream.pipe(request)
+
+    // An error can occur after the finish event and therefore will
+    // not be handled by eventToPromise().
+    //
+    // As a consequence, add an empty error handler to avoid a crash.
+    request.on('error', noop)
     return loop()
   }
 
-  async _importVm (stream, sr, onlyMetadata = false, onVmCreation = undefined) {
+  async _putVmWithLength (cancellation, hostname, stream, query, length) {
+    const responseStream = got.stream.put({
+      hostname,
+      path: '/import/'
+    }, {
+      body: stream,
+      headers: { 'content-length': length },
+      query
+    })
+
+    const request = await eventToPromise(responseStream, 'request')
+    request.on('end', () => console.log('Request end'))
+    request.on('close', () => console.log('Request close'))
+    request.on('error', () => console.log('Request error'))
+    request.on('abort', () => console.log('Request aborted'))
+    request.socket.on('end', () => console.log('Socket end'))
+    request.socket.on('close', () => console.log('Socket close'))
+    request.socket.on('error', () => console.log('Socket error'))
+    request.socket.on('abort', () => console.log('Request abort'))
+    cancellation.then(() => {
+      request.socket.destroy()
+      request.end()
+      request.abort()
+    }).catch(::console.error)
+
+    responseStream.resume()
+    await eventToPromise(responseStream, 'end')
+  }
+
+  async _importVm (cancellation, stream, length, sr, onlyMetadata = false, onVmCreation = undefined) {
     const taskRef = await this._createTask('VM import')
     const query = {
       force: onlyMetadata
@@ -1604,7 +1705,17 @@ export default class Xapi extends XapiBase {
       host = this.pool.$master
     }
 
+    cancellation.then(() => {
+      this.call('task.cancel', taskRef).then(() => {
+        console.log('Cancellation ok')
+      })
+    })::pDebug('task.cancel')
+
     const path = onlyMetadata ? '/import_metadata/' : '/import/'
+
+    const upload = length
+      ? this._putVmWithLength(cancellation, host.address, stream, query, length)
+      : this._putVmWithoutLength(cancellation, host.address, stream, path, query)
 
     if (onVmCreation) {
       this._waitObject(
@@ -1633,11 +1744,13 @@ export default class Xapi extends XapiBase {
   }
 
   // TODO: an XVA can contain multiple VMs
-  async importVm (stream, {
+  @cancellable
+  async importVm (cancellation, stream, length, {
     onlyMetadata = false,
     srId
   } = {}) {
-    return /* await */ this._getOrWaitObject(await this._importVm(
+    return await this._getOrWaitObject(await this._importVm(
+      cancellation,
       stream,
       srId && this.getObject(srId),
       onlyMetadata
@@ -2136,14 +2249,17 @@ export default class Xapi extends XapiBase {
       vdi: vdi.$ref
     }
 
-    const host = vdi.$SR.$PBDs[0].$host
+    const pbd = find(vdi.$SR.$PBDs, 'currently_attached')
+    if (!pbd) {
+      throw new Error('no valid PBDs found')
+    }
 
     const task = this._watchTask(taskRef)
     await Promise.all([
       stream.checksumVerified,
       task,
       put(stream, {
-        hostname: host.address,
+        hostname: pbd.$host.address,
         method: 'put',
         path: '/import_raw_vdi/',
         query

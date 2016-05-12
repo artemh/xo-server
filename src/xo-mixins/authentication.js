@@ -151,7 +151,7 @@ export default class {
   }
 
   async deleteAuthenticationToken (id) {
-    if (!await this._tokens.remove(id)) { // eslint-disable-line space-before-keywords
+    if (!await this._tokens.remove(id)) {
       throw new NoSuchAuthenticationToken(id)
     }
   }
@@ -175,7 +175,7 @@ export default class {
     return token
   }
 
-  async _getAuthenticationTokensForUser (userId) {
+  async getAuthenticationTokensForUser (userId) {
     return this._tokens.get({ user_id: userId })
   }
 }
