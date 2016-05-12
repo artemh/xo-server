@@ -114,7 +114,7 @@
     "passport-local": "^1.0.0",
     "promise-toolbox": "^0.3.2",
     "proxy-agent": "^2.0.0",
-    "pug": "^2.0.0",
+    "pug": "^2.0.0-alpha7",
     "redis": "^2.0.1",
     "schema-inspector": "^1.5.1",
     "semver": "^5.1.0",
