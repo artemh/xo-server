@@ -378,6 +378,7 @@ export default class {
     const bases = sortBy(
       filter(vdiParent.$snapshots, { name_label: 'XO_DELTA_BASE_VDI_SNAPSHOT' }),
       base => base.snapshot_time
+<<<<<<< HEAD
     )
     forEach(bases, base => { xapi.deleteVdi(base.$id)::pCatch(noop) })
 
@@ -393,6 +394,65 @@ export default class {
         // Significant transfer time on the network !
         checksum: !isFull,
         flags: 'wx'
+      })
+
+      stream.on('error', error => targetStream.emit('error', error))
+
+      await Promise.all([
+        eventToPromise(stream.pipe(targetStream), 'finish'),
+        stream.task
+      ])
+    } catch (error) {
+      // Remove new backup. (corrupt).
+      await handler.unlink(backupFullPath, { checksum: true })::pCatch(noop)
+
+      throw error
+    }
+
+    // Returns relative path.
+    return `${backupDirectory}/${vdiFilename}`
+  }
+
+  async _removeOldDeltaVmBackups (xapi, { vm, handler, dir, depth }) {
+    const bases = sortBy(
+      filter(vm.$snapshots, { name_label: 'XO_DELTA_BASE_VM_SNAPSHOT' }),
+      base => base.snapshot_time
+    )
+    bases.pop()
+    Promise.all(mapToArray(bases, base => xapi.deleteVm(base.$id, true)))::pCatch(noop)
+
+    const backups = await this._listDeltaVmBackups(handler, dir)
+    const nOldBackups = backups.length - depth
+
+    if (nOldBackups > 0) {
+      await Promise.all(
+        mapToArray(backups.slice(0, nOldBackups), async backup => {
+          // Remove json file.
+          await handler.unlink(`${dir}/${backup}`)
+
+          // Remove xva file.
+          // Version 0.0.0 (Legacy) Delta Backup.
+          handler.unlink(`${dir}/${getDeltaBackupNameWithoutExt(backup)}.xva`)::pCatch(noop)
+        })
+      )
+    }
+  }
+
+=======
+    )
+    forEach(bases, base => { xapi.deleteVdi(base.$id)::pCatch(noop) })
+
+    // Export full or delta backup.
+    const vdiFilename = `${date}_${isFull ? 'full' : 'delta'}.vhd`
+    const backupFullPath = `${dir}/${vdiFilename}`
+
+    try {
+      const targetStream = await handler.createOutputStream(backupFullPath, {
+        // FIXME: Checksum is not computed for full vdi backups.
+        // The problem is in the merge case, a delta merged in a full vdi
+        // backup forces us to browse the resulting file =>
+        // Significant transfer time on the network !
+        checksum: !isFull
       })
 
       stream.on('error', error => targetStream.emit('error', error))
@@ -430,6 +490,7 @@ export default class {
     }
   }
 
+>>>>>>> next-release
   @deferrable.onFailure
   async rollingDeltaVmBackup ($onFailure, {vm, remoteId, tag, depth}) {
     const remote = await this._xo.getRemote(remoteId)
@@ -448,6 +509,21 @@ export default class {
 
     // Get most recent base.
     const bases = sortBy(
+<<<<<<< HEAD
+      filter(vm.$snapshots, { name_label: 'XO_DELTA_BASE_VM_SNAPSHOT' }),
+      base => base.snapshot_time
+    )
+    let baseVm
+
+    if (bases.length > 0) {
+      baseVm = bases[bases.length - 1]
+    }
+
+    // Check backup dirs.
+    const dir = `vm_delta_${tag}_${vm.uuid}`
+    const fullVdisRequired = []
+    const this_ = this // Work around http://phabricator.babeljs.io/T7172
+=======
       filter(vm.$snapshots, { name_label: `XO_DELTA_BASE_VM_SNAPSHOT_${tag}` }),
       base => base.snapshot_time
     )
@@ -458,6 +534,7 @@ export default class {
     const dir = `vm_delta_${tag}_${vm.uuid}`
     const fullVdisRequired = []
 
+>>>>>>> next-release
     await Promise.all(
       mapToArray(vm.$VBDs, async vbd => {
         if (!vbd.VDI || vbd.type !== 'Disk') {
@@ -465,7 +542,11 @@ export default class {
         }
 
         const vdi = vbd.$VDI
+<<<<<<< HEAD
+        const backups = await this_._listVdiBackups(handler, `${dir}/vdi_${vdi.uuid}`)
+=======
         const backups = await this._listVdiBackups(handler, `${dir}/vdi_${vdi.uuid}`)
+>>>>>>> next-release
 
         // Force full if missing full.
         if (!find(backups, isFullVdiBackup)) {
@@ -475,8 +556,13 @@ export default class {
     )
 
     // Export...
+<<<<<<< HEAD
+    const delta = await xapi.exportDeltaVm(vm.$id, baseVm.$id, {
+      snapshotNameLabel: 'XO_DELTA_BASE_VM_SNAPSHOT',
+=======
     const delta = await xapi.exportDeltaVm(vm.$id, baseVm && baseVm.$id, {
       snapshotNameLabel: `XO_DELTA_BASE_VM_SNAPSHOT_${tag}`,
+>>>>>>> next-release
       fullVdisRequired,
       disableBaseTags: true
     })
@@ -489,15 +575,24 @@ export default class {
 
       await xapi.deleteVm(delta.vm.$id, true)
     })
+<<<<<<< HEAD
+=======
 
+>>>>>>> next-release
     // Save vdis.
     const vdiBackups = await pSettle(
       mapToArray(delta.vdis, async (vdi, key) => {
         const vdiParent = xapi.getObject(vdi.snapshot_of)
 
+<<<<<<< HEAD
+        return this_._saveDeltaVdiBackup(xapi, {
+          vdiParent,
+          isFull: find(fullVdisRequired, id => vdiParent.$id === id),
+=======
         return this._saveDeltaVdiBackup(xapi, {
           vdiParent,
           isFull: !baseVm || find(fullVdisRequired, id => vdiParent.$id === id),
+>>>>>>> next-release
           handler,
           stream: delta.streams[`${key}.vhd`],
           dir,
@@ -545,12 +640,17 @@ export default class {
 
     $onFailure(() => handler.unlink(infoPath)::pCatch(noop))
 
+<<<<<<< HEAD
     const { streams,
       ...infos
     } = delta
 
     // Write Metadata.
     await handler.outputFile(infoPath, JSON.stringify(infos, null, 2), {flag: 'wx'})
+=======
+    // Write Metadata.
+    await handler.outputFile(infoPath, JSON.stringify(delta, null, 2))
+>>>>>>> next-release
 
     // Here we have a completed backup. We can merge old vdis.
     await Promise.all(
@@ -564,10 +664,13 @@ export default class {
     // Delete old backups.
     await this._removeOldDeltaVmBackups(xapi, { vm, handler, dir, depth })
 
+<<<<<<< HEAD
+=======
     if (baseVm) {
       xapi.deleteVm(baseVm.$id, true)::pCatch(noop)
     }
 
+>>>>>>> next-release
     // Returns relative path.
     return `${dir}/${backupFormat}`
   }
@@ -631,7 +734,7 @@ export default class {
   }
 
   async _backupVm (vm, handler, file, {compress, onlyMetadata}) {
-    const targetStream = await handler.createOutputStream(file, { flags: 'wx' })
+    const targetStream = await handler.createOutputStream(file)
     const promise = eventToPromise(targetStream, 'finish')
 
     const sourceStream = await this._xo.getXapi(vm).exportVm(vm._xapiId, {

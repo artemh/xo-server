@@ -688,14 +688,14 @@ rollingDeltaBackup = $coroutine ({vm, remote, tag, depth}) ->
   })
 
 rollingDeltaBackup.params = {
-  vm: { type: 'string' }
+  id: { type: 'string' }
   remote: { type: 'string' }
   tag: { type: 'string'}
   depth: { type: ['string', 'number'] }
 }
 
 rollingDeltaBackup.resolve = {
-  vm: ['vm', ['VM', 'VM-snapshot'], 'administrate']
+  vm: ['id', ['VM', 'VM-snapshot'], 'administrate']
 }
 
 rollingDeltaBackup.permission = 'admin'
@@ -726,12 +726,12 @@ exports.importDeltaBackup = importDeltaBackup
 deltaCopy = ({ vm, sr }) -> @deltaCopyVm(vm, sr)
 
 deltaCopy.params = {
-  vm: { type: 'string' },
+  id: { type: 'string' },
   sr: { type: 'string' }
 }
 
 deltaCopy.resolve = {
-  vm: [ 'vm', 'VM', 'operate'],
+  vm: [ 'id', 'VM', 'operate'],
   sr: [ 'sr', 'SR', 'operate']
 }
 
@@ -1020,7 +1020,12 @@ handleVmImport = $coroutine (req, res, { xapi, srId }) ->
   req.setTimeout(43200000) # 12 hours
 
   try
-    vm = yield xapi.importVm(req, { srId })
+    promise = xapi.importVm(req, contentLength)
+    res.on('close', () ->
+      promise.cancel()
+    )
+    vm = yield promise
+
     res.end(format.response(0, vm.$id))
   catch e
     res.writeHead(500)
